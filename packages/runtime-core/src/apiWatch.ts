@@ -60,6 +60,7 @@ type InvalidateCbRegistrator = (cb: () => void) => void
 
 export interface WatchOptionsBase {
   flush?: 'pre' | 'post' | 'sync'
+  fixed?: Boolean
   onTrack?: ReactiveEffectOptions['onTrack']
   onTrigger?: ReactiveEffectOptions['onTrigger']
 }
@@ -131,7 +132,14 @@ export function watch<T = any>(
 function doWatch(
   source: WatchSource | WatchSource[] | WatchEffect,
   cb: WatchCallback | null,
-  { immediate, deep, flush, onTrack, onTrigger }: WatchOptions = EMPTY_OBJ,
+  {
+    immediate,
+    deep,
+    flush,
+    onTrack,
+    onTrigger,
+    fixed
+  }: WatchOptions = EMPTY_OBJ,
   instance = currentInstance
 ): WatchStopHandle {
   if (__DEV__ && !cb) {
@@ -158,14 +166,17 @@ function doWatch(
     )
   }
 
+  let fixedDepencencies = !!fixed
   let getter: () => any
   const isRefSource = isRef(source)
   if (isRefSource) {
     getter = () => (source as Ref).value
+    fixedDepencencies = true
   } else if (isReactive(source)) {
     getter = () => source
     deep = true
   } else if (isArray(source)) {
+    fixedDepencencies = source.findIndex(s => !isRef(s)) < 0
     getter = () =>
       source.map(s => {
         if (isRef(s)) {
@@ -302,6 +313,8 @@ function doWatch(
     runner()
   }
 
+  if (fixedDepencencies) runner.noRe = true
+
   return () => {
     stop(runner)
     if (instance) {
@@ -318,9 +331,19 @@ export function instanceWatch(
   options?: WatchOptions
 ): WatchStopHandle {
   const publicThis = this.proxy as any
-  const getter = isString(source)
-    ? () => publicThis[source]
-    : source.bind(publicThis)
+  let getter
+  if (isString(source)) {
+    getter = () => publicThis[source]
+    if (
+      !(source in this.data) && // the data object can have getters
+      source.indexOf('.') < 0
+    ) {
+      options = options || {}
+      options.fixed = true
+    }
+  } else {
+    getter = source.bind(publicThis)
+  }
   return doWatch(getter, cb.bind(publicThis), options, this)
 }
 
