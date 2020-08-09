@@ -17,6 +17,7 @@ export interface ReactiveEffect<T = any> {
   raw: () => T
   deps: Array<Dep>
   options: ReactiveEffectOptions
+  noRe?: boolean
 }
 
 export interface ReactiveEffectOptions {
@@ -84,17 +85,21 @@ function createReactiveEffect<T = any>(
     if (!effect.active) {
       return options.scheduler ? undefined : fn()
     }
-    if (!effectStack.includes(effect)) {
-      cleanup(effect)
-      try {
-        enableTracking()
-        effectStack.push(effect)
-        activeEffect = effect
-        return fn()
-      } finally {
-        effectStack.pop()
-        resetTracking()
-        activeEffect = effectStack[effectStack.length - 1]
+    if (effect.noRe) {
+      return fn()
+    } else {
+      if (!effectStack.includes(effect)) {
+        cleanup(effect)
+        try {
+          enableTracking()
+          effectStack.push(effect)
+          activeEffect = effect
+          return fn()
+        } finally {
+          effectStack.pop()
+          resetTracking()
+          activeEffect = effectStack[effectStack.length - 1]
+        }
       }
     }
   } as ReactiveEffect
