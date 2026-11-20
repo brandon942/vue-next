@@ -1,0 +1,156 @@
+import {
+  currentInstance,
+  onMounted,
+  vModelCheckboxInit,
+  vModelCheckboxUpdate,
+  vModelGetValue,
+  vModelSelectInit,
+  vModelSetSelected,
+  vModelTextInit,
+  vModelTextUpdate,
+} from '@vue/runtime-dom'
+import { registerSelectUpdate, renderEffect } from '../renderEffect'
+import { inOnce, withOnce } from '../once'
+import { isHydrating, isRecreatedNode } from '../dom/hydration'
+import { isArray, isSet, looseEqual } from '@vue/shared'
+import { Dep, getCurrentScope, trackDep, traverse } from '@vue/reactivity'
+import type { VaporComponentInstance } from '../component'
+
+type VaporModelDirective<
+  T extends HTMLElement =
+    | HTMLInputElement
+    | HTMLTextAreaElement
+    | HTMLSelectElement,
+  Modifiers extends string = string,
+> = (
+  el: T,
+  get: () => any,
+  set: (v: any) => void,
+  modifiers?: { [key in Modifiers]?: true },
+) => void
+
+function ensureMounted(cb: () => void) {
+  const instance = currentInstance as VaporComponentInstance
+  if (instance.isMounted) {
+    cb()
+  } else {
+    // Deferred work keeps the branch scope and once ambient it was created under.
+    let scope = getCurrentScope()
+    const run = inOnce ? () => withOnce(cb) : cb
+    onMounted(() => {
+      const currentScope = scope!
+      scope = undefined
+      if (currentScope.active) {
+        // the effects created here first run as part of the mount, which
+        // has no update hooks
+        const prevUpdating = instance.isUpdating
+        instance.isUpdating = true
+        try {
+          currentScope.run(run)
+        } finally {
+          instance.isUpdating = prevUpdating
+        }
+      }
+    })
+  }
+}
+
+export const applyTextModel: VaporModelDirective<
+  HTMLInputElement | HTMLTextAreaElement,
+  'trim' | 'number' | 'lazy'
+> = (el, get, set, { trim, number, lazy } = {}) => {
+  vModelTextInit(el, trim, number, lazy, set)
+  ensureMounted(() => {
+    let value: any
+    renderEffect(() => {
+      vModelTextUpdate(el, value, (value = get()), trim, number, lazy)
+    })
+  })
+}
+
+export const applyCheckboxModel: VaporModelDirective<HTMLInputElement> = (
+  el: HTMLInputElement & { _valueDep?: Dep },
+  get,
+  set,
+) => {
+  vModelCheckboxInit(el, set)
+  ensureMounted(() => {
+    let value: any
+    renderEffect(() => {
+      const oldValue = value
+      // #4096 array checkboxes need to be deep traversed
+      value = traverse(get())
+      if (!inOnce && (isArray(value) || isSet(value))) {
+        // Track the effective value, including merged and fallthrough bindings.
+        trackDep(el._valueDep || (el._valueDep = new Dep()), el, '_value')
+      }
+      vModelCheckboxUpdate(el, oldValue, value)
+    })
+  })
+}
+
+export const applyRadioModel: VaporModelDirective<HTMLInputElement> = (
+  el,
+  get,
+  set,
+) => {
+  // static listener: lives and dies with the element, no disposer needed
+  el.addEventListener('change', () => set(vModelGetValue(el)))
+  const hydrating = isHydrating && !isRecreatedNode(el)
+  ensureMounted(() => {
+    let value: any
+    let initial = true
+    renderEffect(() => {
+      const oldValue = value
+      if ((value = get()) !== oldValue || initial) {
+        const checked = looseEqual(value, vModelGetValue(el))
+        // like vdom, an initially undefined model leaves a checked set by the
+        // template alone on mount, while a server-rendered one follows it
+        if (checked || !initial || value !== undefined || hydrating) {
+          el.checked = checked
+        }
+        initial = false
+      }
+    })
+  })
+}
+
+export const applySelectModel: VaporModelDirective<
+  HTMLSelectElement,
+  'number'
+> = (el, get, set, modifiers) => {
+  const number = modifiers && modifiers.number
+  vModelSelectInit(el, get(), number, set)
+  if (inOnce) {
+    ensureMounted(() => vModelSetSelected(el, get(), number))
+    return
+  }
+  // The owner's effects can update options directly or through child inputs
+  // without touching the model. Apply selection after their DOM updates.
+  const update = () => vModelSetSelected(el, get(), number)
+  registerSelectUpdate(update)
+  ensureMounted(() => {
+    update()
+    // Only tracks the model; the queued selection update applies it.
+    renderEffect(() => traverse(get()))
+  })
+}
+
+export const applyDynamicModel: VaporModelDirective = (
+  el,
+  get,
+  set,
+  modifiers,
+) => {
+  let apply: VaporModelDirective<any> = applyTextModel
+  if (el.tagName === 'SELECT') {
+    apply = applySelectModel
+  } else if (el.tagName === 'TEXTAREA') {
+    apply = applyTextModel
+  } else if ((el as HTMLInputElement).type === 'checkbox') {
+    apply = applyCheckboxModel
+  } else if ((el as HTMLInputElement).type === 'radio') {
+    apply = applyRadioModel
+  }
+  apply(el, get, set, modifiers)
+}

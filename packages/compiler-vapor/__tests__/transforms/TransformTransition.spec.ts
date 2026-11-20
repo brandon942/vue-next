@@ -1,0 +1,355 @@
+import { makeCompile } from './_utils'
+import {
+  compile,
+  transformChildren,
+  transformElement,
+  transformKey,
+  transformText,
+  transformVBind,
+  transformVIf,
+  transformVShow,
+  transformVSlot,
+} from '@vue/compiler-vapor'
+import { transformTransition } from '../../src/transforms/transformTransition'
+import { DOMErrorCodes } from '@vue/compiler-dom'
+
+const compileWithElementTransform = makeCompile({
+  nodeTransforms: [
+    transformText,
+    transformVIf,
+    transformKey,
+    transformElement,
+    transformVSlot,
+    transformChildren,
+    transformTransition,
+  ],
+  directiveTransforms: {
+    bind: transformVBind,
+    show: transformVShow,
+  },
+})
+
+describe('compiler: transition', () => {
+  test('basic', () => {
+    const { code } = compileWithElementTransform(
+      `<Transition><h1 v-show="show">foo</h1></Transition>`,
+    )
+    expect(code).toMatchSnapshot()
+  })
+
+  test('v-show + appear', () => {
+    const { code } = compileWithElementTransform(
+      `<Transition appear><h1 v-show="show">foo</h1></Transition>`,
+    )
+    expect(code).toMatchSnapshot()
+  })
+
+  test('work with v-if', () => {
+    const { code } = compileWithElementTransform(
+      `<Transition><h1 v-if="show">foo</h1></Transition>`,
+    )
+
+    expect(code).toMatchSnapshot()
+  })
+
+  test('work with dynamic keyed children', () => {
+    const { code } = compileWithElementTransform(
+      `<Transition>
+        <h1 :key="key">foo</h1>
+      </Transition>`,
+    )
+
+    expect(code).toMatchSnapshot()
+    expect(code).contains('_createKeyedFragment(() => (_ctx.key)')
+  })
+
+  function checkWarning(template: string, shouldWarn = true) {
+    const onError = vi.fn()
+    compileWithElementTransform(template, { onError })
+    if (shouldWarn) {
+      expect(onError).toHaveBeenCalled()
+      expect(onError.mock.calls).toMatchObject([
+        [{ code: DOMErrorCodes.X_TRANSITION_INVALID_CHILDREN }],
+      ])
+    } else {
+      expect(onError).not.toHaveBeenCalled()
+    }
+  }
+
+  test('warns if multiple children', () => {
+    checkWarning(
+      `<Transition>
+        <h1>foo</h1>
+        <h2>bar</h2>
+      </Transition>`,
+      true,
+    )
+  })
+
+  test('warns with v-for', () => {
+    checkWarning(
+      `
+      <transition>
+        <div v-for="i in items">hey</div>
+      </transition>
+      `,
+      true,
+    )
+  })
+
+  test('warns with multiple v-if + v-for', () => {
+    checkWarning(
+      `
+      <transition>
+        <div v-if="a" v-for="i in items">hey</div>
+        <div v-else v-for="i in items">hey</div>
+      </transition>
+      `,
+      true,
+    )
+  })
+
+  test('warns with template v-if', () => {
+    checkWarning(
+      `
+      <transition>
+        <template v-if="ok"></template>
+      </transition>
+      `,
+      true,
+    )
+  })
+
+  test('does not warn with template v-if containing one child', () => {
+    checkWarning(
+      `
+      <transition>
+        <template v-if="ok">
+          <div>hey</div>
+        </template>
+      </transition>
+      `,
+      false,
+    )
+  })
+
+  test('warns with template v-if containing multiple children', () => {
+    checkWarning(
+      `
+      <transition>
+        <template v-if="ok">
+          <div>hey</div>
+          <div>there</div>
+        </template>
+      </transition>
+      `,
+      true,
+    )
+  })
+
+  test('warns with template v-if containing v-for', () => {
+    checkWarning(
+      `
+      <transition>
+        <template v-if="ok">
+          <div v-for="i in items">hey</div>
+        </template>
+      </transition>
+      `,
+      true,
+    )
+  })
+
+  test('warns with multiple templates', () => {
+    checkWarning(
+      `
+      <transition>
+        <template v-if="a"></template>
+        <template v-else></template>
+      </transition>
+      `,
+      true,
+    )
+  })
+
+  test('does not warn with multiple templates containing one child each', () => {
+    checkWarning(
+      `
+      <transition>
+        <template v-if="a"><div>hey</div></template>
+        <template v-else><div>there</div></template>
+      </transition>
+      `,
+      false,
+    )
+  })
+
+  test('warns if multiple children with v-if', () => {
+    checkWarning(
+      `
+      <transition>
+        <div v-if="one">hey</div>
+        <div v-if="other">hey</div>
+      </transition>
+      `,
+      true,
+    )
+  })
+
+  test('does not warn with regular element', () => {
+    checkWarning(
+      `
+      <transition>
+        <div>hey</div>
+      </transition>
+      `,
+      false,
+    )
+  })
+
+  test('does not warn with one single v-if', () => {
+    checkWarning(
+      `
+      <transition>
+        <div v-if="a">hey</div>
+      </transition>
+      `,
+      false,
+    )
+  })
+
+  test('does not warn with v-if v-else-if v-else', () => {
+    checkWarning(
+      `
+      <transition>
+        <div v-if="a">hey</div>
+        <div v-else-if="b">hey</div>
+        <div v-else>hey</div>
+      </transition>
+      `,
+      false,
+    )
+  })
+
+  test('does not warn with v-if v-else', () => {
+    checkWarning(
+      `
+      <transition>
+        <div v-if="a">hey</div>
+        <div v-else>hey</div>
+      </transition>
+      `,
+      false,
+    )
+  })
+
+  test('does not warn with multiple children in v-if branch', () => {
+    checkWarning(
+      `
+      <transition>
+        <h1 v-if="condition">
+          <span>True</span>
+          <span>True</span>
+        </h1>
+        <h1 v-else>False</h1>
+      </transition>
+      `,
+      false,
+    )
+  })
+
+  test('inject persisted when child has v-show', () => {
+    expect(
+      compileWithElementTransform(`
+        <Transition>
+          <div v-show="ok" />
+        </Transition>
+    `).code,
+    ).toMatchSnapshot()
+  })
+
+  test('does not inject persisted when v-if owns a v-show child', () => {
+    const { code } = compileWithElementTransform(
+      `<Transition><div v-if="show" v-show="true" /></Transition>`,
+    )
+
+    expect(code).toContain('_createIf')
+    expect(code).toContain('_applyVShow')
+    expect(code).not.toContain('persisted')
+  })
+
+  // #15372
+  test('should drop comment children to match vdom runtime and SSR behavior', () => {
+    // vdom runtime filters comment children of Transition/TransitionGroup and
+    // SSR omits them (#5351, #11961) - vapor drops them at compile time
+    const { code } = compile(
+      `<transition>
+        <!-- comment -->
+        <div>foo</div>
+      </transition>`,
+      { prefixIdentifiers: true },
+    )
+    expect(code).not.toContain('comment')
+    expect(code).toMatchSnapshot()
+
+    const { code: groupCode } = compile(
+      `<transition-group tag="ul">
+        <!-- comment -->
+        <li key="a">a</li>
+        <li key="b">b</li>
+      </transition-group>`,
+      { prefixIdentifiers: true },
+    )
+    expect(groupCode).not.toContain('comment')
+    expect(groupCode).toMatchSnapshot()
+  })
+
+  test('the v-if/else-if/else branches in Transition should ignore comments', () => {
+    const { code } = compile(
+      `
+    <transition>
+      <div v-if="a">hey</div>
+      <!-- this should be ignored -->
+      <div v-else-if="b">hey</div>
+      <!-- this should be ignored -->
+      <div v-else>
+        <p v-if="c"/>
+        <!-- this should not be ignored -->
+        <p v-else/>
+      </div>
+    </transition>
+    `,
+      { prefixIdentifiers: true },
+    )
+    expect(code).toMatchSnapshot()
+    expect(code).not.toContain('this should be ignored')
+    expect(code).toContain('this should not be ignored')
+  })
+
+  test('child of a non-root transition is a root template', () => {
+    const { code } = compileWithElementTransform(
+      `<div><Transition><p class="y">z</p></Transition></div>`,
+    )
+    expect(code).toMatchSnapshot()
+    // the child inherits the transition's fallthrough attrs, so its template
+    // is a root one (class / style layered, not overwritten)
+    expect(code).contains('_template("<p class=y>z", 3)')
+  })
+
+  test('child of a transition under a v-for is a root template', () => {
+    // a v-for only cuts the chain between a host and its root; the
+    // transition's fallthrough reaches its child wherever the transition sits
+    const { code } = compile(
+      `<div v-for="i in l">
+        <Transition>
+          <p v-if="ok" class="y">y</p>
+          <p v-else class="n">n</p>
+        </Transition>
+      </div>`,
+      { prefixIdentifiers: true },
+    )
+    expect(code).toMatchSnapshot()
+    expect(code).contains('_template("<p class=y>y", 1)')
+    expect(code).contains('_template("<p class=n>n", 1)')
+  })
+})

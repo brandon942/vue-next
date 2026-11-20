@@ -1,0 +1,67 @@
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  extends: ['config:recommended', 'schedule:weekly', 'group:allNonMajor'],
+  labels: ['dependencies'],
+  ignorePaths: ['**/__tests__/**'],
+  rangeStrategy: 'bump',
+  minimumReleaseAge: '24 hours',
+  packageRules: [
+    {
+      matchDepTypes: ['peerDependencies'],
+      enabled: false,
+    },
+    {
+      groupName: 'test',
+      matchPackageNames: [
+        'vitest',
+        'jsdom',
+        'playwright',
+        'puppeteer',
+        '@vitest{/,}**',
+      ],
+    },
+    {
+      groupName: 'playground',
+      matchFileNames: [
+        'packages-private/sfc-playground/package.json',
+        'packages-private/template-explorer/package.json',
+      ],
+    },
+    {
+      groupName: 'compiler',
+      matchPackageNames: ['magic-string', '@babel{/,}**', 'postcss{/,}**'],
+    },
+    {
+      groupName: 'build',
+      matchPackageNames: [
+        'vite',
+        'vite-plus',
+        'rolldown-plugin-dts',
+        '@rolldown{/,}**',
+        'oxc-*',
+        '@vitejs{/,}**',
+      ],
+    },
+  ],
+  ignoreDeps: [
+    'vue',
+
+    // manually bumping
+    'node',
+    'typescript',
+
+    // ESM only
+    'estree-walker',
+
+    // v8 is ESM-only and breaks compiler-core's CJS path
+    'entities',
+
+    // pinned
+    // https://github.com/vuejs/core/issues/10300#issuecomment-1940855364
+    'lru-cache',
+
+    // pinned
+    // only used in example for e2e tests
+    'marked',
+  ],
+}

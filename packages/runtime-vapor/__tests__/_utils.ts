@@ -1,0 +1,409 @@
+import { createVaporApp, vaporInteropPlugin } from '../src'
+import { type App, type Component, createApp } from '@vue/runtime-dom'
+import type {
+  VaporComponent,
+  VaporComponentInstance,
+  VaporComponentOptions,
+} from '../src/component'
+import type { RawProps } from '../src/componentProps'
+import {
+  type SFCTemplateCompileOptions,
+  compileScript,
+  compileTemplate,
+  parse,
+} from '@vue/compiler-sfc'
+import * as runtimeVapor from '../src'
+import * as runtimeDom from '@vue/runtime-dom'
+import * as VueServerRenderer from '@vue/server-renderer'
+import {
+  type CompilerOptions,
+  compile as compileVapor,
+} from '@vue/compiler-vapor'
+import { VaporIfFlags } from '@vue/shared'
+
+export interface RenderContext {
+  component: VaporComponent
+  host: HTMLElement
+  instance: VaporComponentInstance | undefined
+  app: App
+  create: (props?: RawProps) => RenderContext
+  mount: (container?: string | ParentNode) => RenderContext
+  render: (props?: RawProps, container?: string | ParentNode) => RenderContext
+  resetHost: () => HTMLDivElement
+  html: () => string
+}
+
+export function makeRender<C = VaporComponent>(
+  initHost = (): HTMLDivElement => {
+    const host = document.createElement('div')
+    host.setAttribute('id', 'host')
+    document.body.appendChild(host)
+    return host
+  },
+): (comp: C) => RenderContext {
+  let host: HTMLElement
+  function resetHost() {
+    return (host = initHost())
+  }
+
+  beforeEach(() => {
+    resetHost()
+  })
+  afterEach(() => {
+    host.remove()
+  })
+
+  function define(comp: C) {
+    const component = comp as any
+    component.__vapor = true
+    let instance: VaporComponentInstance | undefined
+    let app: App
+
+    function render(
+      props: RawProps | undefined = undefined,
+      container: string | ParentNode = host,
+    ) {
+      create(props)
+      return mount(container)
+    }
+
+    function create(props: RawProps | undefined = undefined) {
+      app?.unmount()
+      app = createVaporApp(component, props)
+      return res()
+    }
+
+    function mount(container: string | ParentNode = host) {
+      app.mount(container)
+      instance = app._instance as VaporComponentInstance
+      return res()
+    }
+
+    function html() {
+      return host.innerHTML
+    }
+
+    const res = () => ({
+      component,
+      host,
+      instance,
+      app,
+      create,
+      mount,
+      render,
+      resetHost,
+      html,
+    })
+
+    return res()
+  }
+
+  return define
+}
+
+export interface InteropRenderContext {
+  mount: (container?: string | ParentNode) => InteropRenderContext
+  render: (
+    props?: RawProps,
+    container?: string | ParentNode,
+  ) => InteropRenderContext
+  app: App
+  host: HTMLElement
+  html: () => string
+}
+
+export function makeInteropRender(): (comp: Component) => InteropRenderContext {
+  let host: HTMLElement
+  beforeEach(() => {
+    host = document.createElement('div')
+  })
+  afterEach(() => {
+    host.remove()
+  })
+
+  function define(comp: Component) {
+    let app: App
+    function render(
+      props: RawProps | undefined = undefined,
+      container: string | ParentNode = host,
+    ) {
+      app?.unmount()
+      app = createApp(comp, props)
+      app.use(vaporInteropPlugin)
+      return mount(container)
+    }
+
+    function mount(container: string | ParentNode = host) {
+      app.mount(container)
+      return res()
+    }
+
+    function html() {
+      return host.innerHTML
+    }
+
+    const res = () => ({
+      app,
+      host,
+      mount,
+      render,
+      html,
+    })
+
+    return res()
+  }
+
+  return define
+}
+
+export { runtimeDom, runtimeVapor, VueServerRenderer }
+
+export function ifFlags(
+  blockShape: number,
+  once = false,
+  index?: number,
+): number {
+  return (
+    blockShape |
+    (once ? VaporIfFlags.ONCE : 0) |
+    (index === undefined ? 0 : (index + 1) << VaporIfFlags.INDEX_SHIFT)
+  )
+}
+
+export function compile(
+  sfc: string,
+  data: runtimeDom.Ref<any>,
+  components: Record<string, any> = {},
+  {
+    vapor = true,
+    ssr = false,
+    id = 'x',
+    compilerOptions,
+    inlineTemplate = true,
+  }: {
+    vapor?: boolean | undefined
+    ssr?: boolean | undefined
+    // scope id for `<style scoped>` sources; distinct ids tell components apart
+    id?: string
+    compilerOptions?: SFCTemplateCompileOptions['compilerOptions'] | undefined
+    // false compiles like a dev build: script bindings + a separate render
+    inlineTemplate?: boolean
+  } = {},
+): any {
+  if (!sfc.includes(`<script`)) {
+    sfc =
+      `<script vapor>const data = _data; const components = _components;</script>` +
+      sfc
+  }
+  // the template ast is parsed once here and reused by `compileScript`, so the
+  // parse has to see the same options the compile does (`isCustomElement`
+  // decides whether a tag is a component already at parse time)
+  const descriptor = parse(sfc, {
+    templateParseOptions: compilerOptions,
+  }).descriptor
+
+  const script = compileScript(descriptor, {
+    id,
+    isProd: inlineTemplate,
+    inlineTemplate,
+    genDefaultAs: '__sfc__',
+    vapor,
+    templateOptions: {
+      ssr,
+      compilerOptions,
+    },
+  })
+
+  let code = script.content
+  if (!inlineTemplate) {
+    code +=
+      '\n' +
+      compileTemplate({
+        source: descriptor.template!.content,
+        filename: 'x.vue',
+        id,
+        vapor,
+        compilerOptions: {
+          ...compilerOptions,
+          bindingMetadata: script.bindings,
+        },
+      }).code.replace('export function render', 'function render') +
+      '\n__sfc__.render = render'
+  }
+  code =
+    code
+      .replace(/\bimport {/g, 'const {')
+      .replace(/ as _/g, ': _')
+      .replace(/} from ['"]vue['"]/g, `} = Vue`)
+      .replace(/} from "vue\/server-renderer"/g, '} = VueServerRenderer') +
+    '\nreturn __sfc__'
+
+  return new Function('Vue', 'VueServerRenderer', '_data', '_components', code)(
+    { ...runtimeDom, ...runtimeVapor },
+    VueServerRenderer,
+    data,
+    components,
+  )
+}
+
+/**
+ * Compile `srcs` in order, each one scoped under its lowercased name and
+ * registered on `_components` for the ones after it, and return the last one
+ * (the root). With `vapor`, the `vdomOnly` ones stay vdom.
+ */
+export function compileScoped(
+  srcs: Record<string, string>,
+  data: runtimeDom.Ref<any>,
+  {
+    vapor = true,
+    ssr = false,
+    vdomOnly = [],
+  }: { vapor?: boolean; ssr?: boolean; vdomOnly?: string[] } = {},
+): any {
+  const components: Record<string, any> = {}
+  let root: any
+  for (const name in srcs) {
+    const id = name.toLowerCase()
+    const asVapor = vapor && !vdomOnly.includes(name)
+    root = components[name] = compile(
+      `<script setup${asVapor ? ' vapor' : ''}>
+        const data = _data; const components = _components
+      </script>
+      <template>${srcs[name]}</template>
+      <style scoped>p {}</style>`,
+      data,
+      components,
+      { vapor: asVapor, ssr, id },
+    )
+    root.__scopeId = `data-v-${id}`
+  }
+  return root
+}
+
+export interface ParityResult {
+  after: string
+  text: string
+}
+
+/**
+ * Mount the same SFC sources as a vdom app and as a vapor app in turn
+ * (`srcs.App` is the root; the rest register on `_components` in order),
+ * run `act`, and return each mode's final html and text. Sources without a
+ * `<script>` get a plain `<script setup>` so the mode comes from the compile
+ * option (`compile()` would inject `<script vapor>`, which forces vapor).
+ * `extra` components are shared by both modes as given. `act` is told which
+ * mode it is running in, so it can collect its own per-mode results without
+ * depending on the order the modes are rendered in.
+ */
+export async function renderParity(
+  srcs: Record<string, string>,
+  makeData: () => runtimeDom.Ref<any>,
+  act: (
+    data: runtimeDom.Ref<any>,
+    root: HTMLElement,
+    mode: 'vdom' | 'vapor',
+  ) => void | Promise<void>,
+  extra: Record<string, any> = {},
+  compilerOptions?: SFCTemplateCompileOptions['compilerOptions'],
+): Promise<{ vdom: ParityResult; vapor: ParityResult }> {
+  const results = {} as { vdom: ParityResult; vapor: ParityResult }
+  for (const vapor of [false, true]) {
+    const data = makeData()
+    const components: Record<string, any> = { ...extra }
+    const withScript = (src: string) =>
+      src.includes('<script')
+        ? src
+        : `<script setup>const data = _data; const components = _components;</script>` +
+          src
+    for (const name in srcs) {
+      if (name !== 'App') {
+        components[name] = compile(withScript(srcs[name]), data, components, {
+          vapor,
+          compilerOptions,
+        })
+      }
+    }
+    const App = compile(withScript(srcs.App), data, components, {
+      vapor,
+      compilerOptions,
+    })
+    const root = document.createElement('div')
+    const app = vapor ? createVaporApp(App) : createApp(App)
+    app.use(vaporInteropPlugin).mount(root)
+    await act(data, root, vapor ? 'vapor' : 'vdom')
+    await runtimeDom.nextTick()
+    results[vapor ? 'vapor' : 'vdom'] = {
+      after: root.innerHTML,
+      text: root.textContent!,
+    }
+    app.unmount()
+  }
+  return results
+}
+
+export function compileToVaporRender(
+  template: string,
+  options?: CompilerOptions,
+): VaporComponentOptions['render'] {
+  let { code } = compileVapor(template, {
+    mode: 'module',
+    prefixIdentifiers: true,
+    hmr: true,
+    ...options,
+  })
+
+  const transformed = code
+    .replace(/\bimport {/g, 'const {')
+    .replace(/ as _/g, ': _')
+    .replace(/} from ['"]vue['"];/g, '} = Vue;')
+    .replace(/export function render/, 'function render')
+
+  return new Function('Vue', `${transformed}\nreturn render`)({
+    ...runtimeDom,
+    ...runtimeVapor,
+  })
+}
+
+export function shuffle(array: Array<any>): any[] {
+  let currentIndex = array.length
+  let temporaryValue
+  let randomIndex
+
+  // while there remain elements to shuffle...
+  while (currentIndex !== 0) {
+    // pick a remaining element...
+    randomIndex = Math.floor(Math.random() * currentIndex)
+    currentIndex -= 1
+    // and swap it with the current element.
+    temporaryValue = array[currentIndex]
+    array[currentIndex] = array[randomIndex]
+    array[randomIndex] = temporaryValue
+  }
+  return array
+}
+
+export function stripAnchors(html: string): string {
+  return html.replace(/<!--[^>]*-->/g, '')
+}
+
+// A `v-if` + `elseIfs` × `v-else-if` (+ `v-else`) chain; the default length
+// is past the compiler's threshold, so it compiles to one `createIfChain`.
+export function ifChain(
+  branch: (i: number, dir: string) => string,
+  {
+    elseIfs = 11,
+    withElse = true,
+    cond = (i: number) => `data.k === ${i}`,
+  }: {
+    elseIfs?: number
+    withElse?: boolean
+    cond?: (i: number) => string
+  } = {},
+): string {
+  let src = ''
+  for (let i = 0; i <= elseIfs; i++) {
+    src += branch(i, `${i === 0 ? 'v-if' : 'v-else-if'}="${cond(i)}"`) + '\n'
+  }
+  if (withElse) src += branch(elseIfs + 1, 'v-else')
+  return src
+}

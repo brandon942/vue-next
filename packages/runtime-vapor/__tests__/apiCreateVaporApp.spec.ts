@@ -1,0 +1,622 @@
+import {
+  type VaporDirective,
+  createComponent,
+  createTextNode,
+  createVaporApp,
+  createVaporSSRApp,
+  defineVaporComponent,
+  template,
+  vaporInteropPlugin,
+  withVaporDirectives,
+} from '../src'
+import {
+  type GenericComponentInstance,
+  type Plugin,
+  createApp,
+  currentInstance,
+  inject,
+  nextTick,
+  onMounted,
+  onUnmounted,
+  provide,
+  ref,
+  resolveComponent,
+  resolveDirective,
+  warn,
+  watch,
+} from '@vue/runtime-dom'
+import { compile, compileToVaporRender, makeRender } from './_utils'
+import type { VaporComponent } from '../src/component'
+
+const define = makeRender()
+
+describe('api: createVaporApp', () => {
+  test('mount', () => {
+    const Comp = defineVaporComponent({
+      props: {
+        count: { default: 0 },
+      },
+      setup(props) {
+        return createTextNode(String(props.count))
+      },
+    })
+
+    const root1 = document.createElement('div')
+    createVaporApp(Comp).mount(root1)
+    expect(root1.innerHTML).toBe(`0`)
+
+    //#5571 mount multiple apps to the same host element
+    createVaporApp(Comp).mount(root1)
+    expect(`mount target container is not empty`).toHaveBeenWarned()
+    expect(
+      `There is already an app instance mounted on the host container`,
+    ).toHaveBeenWarned()
+
+    // mount with props
+    const root2 = document.createElement('div')
+    const app2 = createVaporApp(Comp, { count: () => 1 })
+    app2.mount(root2)
+    expect(root2.innerHTML).toBe(`1`)
+
+    // remount warning
+    const root3 = document.createElement('div')
+    app2.mount(root3)
+    expect(root3.innerHTML).toBe(``)
+    expect(`already been mounted`).toHaveBeenWarned()
+  })
+
+  test('preserves root context while evaluating root props', () => {
+    const Comp = defineVaporComponent({
+      props: ['value'],
+      setup(props) {
+        return createTextNode(String(props.value))
+      },
+    })
+    const app = createVaporApp(Comp, { value: () => inject('token') })
+    app.provide('token', 'provided value')
+    const root = document.createElement('div')
+    try {
+      app.mount(root)
+      expect(root.textContent).toBe('provided value')
+    } finally {
+      app.unmount()
+    }
+  })
+
+  test('mounts a root without a parent after an unhandled setup error', () => {
+    const Failed = defineVaporComponent({
+      setup() {
+        provide('key', 'failed app')
+        throw new Error('setup error')
+      },
+    })
+    expect(() =>
+      createVaporApp(Failed).mount(document.createElement('div')),
+    ).toThrow('setup error')
+    expect('Unhandled error during execution of setup').toHaveBeenWarned()
+
+    let instance: GenericComponentInstance
+    const Comp = defineVaporComponent({
+      setup() {
+        instance = currentInstance!
+        return createTextNode(String(inject('key')))
+      },
+    })
+    const app = createVaporApp(Comp)
+    app.provide('key', 'second app')
+    const root = document.createElement('div')
+    app.mount(root)
+    expect(root.textContent).toBe('second app')
+    expect(instance!.parent).toBeNull()
+    expect(instance!.appContext).toBe(app._context)
+  })
+
+  test('mount should no-op when selector returns null', () => {
+    const Comp = defineVaporComponent({
+      setup() {
+        return createTextNode('hello')
+      },
+    })
+    const app = createVaporApp(Comp)
+    let proxy: any
+
+    expect(() => {
+      proxy = app.mount('#not-exist-id')
+    }).not.toThrow()
+
+    expect(proxy).toBeUndefined()
+    expect(
+      'Failed to mount app: mount target selector "#not-exist-id" returned null.',
+    ).toHaveBeenWarned()
+    expect(app._container).toBeNull()
+  })
+
+  test('unmount', () => {
+    const Comp = defineVaporComponent({
+      props: {
+        count: { default: 0 },
+      },
+      setup(props) {
+        return createTextNode(String(props.count))
+      },
+    })
+
+    const root = document.createElement('div')
+    const app = createVaporApp(Comp)
+
+    // warning
+    app.unmount()
+    expect(`that is not mounted`).toHaveBeenWarned()
+
+    app.mount(root)
+
+    app.unmount()
+    expect(root.innerHTML).toBe(``)
+  })
+
+  test.each([false, true])(
+    'mount and unmount leave other apps watchers queued (hydrate: %s)',
+    async hydrate => {
+      const source = ref(0)
+      const order: string[] = []
+      const existing = createApp({
+        setup() {
+          watch(source, () => order.push('existing pre'))
+          watch(source, () => order.push('existing post'), { flush: 'post' })
+          return () => null
+        },
+      })
+      existing.mount(document.createElement('div'))
+
+      const Comp = defineVaporComponent({
+        setup() {
+          const count = ref(0)
+          watch(count, () => order.push('own pre'))
+          onMounted(() => order.push('mounted'))
+          onUnmounted(() => order.push('unmounted'))
+          count.value++
+          source.value++
+          return template('<div>nested</div>')()
+        },
+      })
+      const root = document.createElement('div')
+      if (hydrate) root.innerHTML = '<div>nested</div>'
+      const app = (hydrate ? createVaporSSRApp : createVaporApp)(Comp)
+      try {
+        source.value++
+        app.mount(root)
+        expect(root.innerHTML).toBe('<div>nested</div>')
+        expect(order).toEqual(['own pre', 'mounted'])
+        app.unmount()
+        expect(order).toEqual(['own pre', 'mounted', 'unmounted'])
+        await nextTick()
+        expect(order).toEqual([
+          'own pre',
+          'mounted',
+          'unmounted',
+          'existing pre',
+          'existing post',
+        ])
+      } finally {
+        if (app._container?.hasChildNodes()) app.unmount()
+        existing.unmount()
+      }
+    },
+  )
+
+  test('unmount in non-dev mode', () => {
+    __DEV__ = false
+    try {
+      const Comp = defineVaporComponent({
+        setup() {
+          return createTextNode('ok')
+        },
+      })
+
+      const root = document.createElement('div')
+      const app = createVaporApp(Comp)
+
+      app.mount(root)
+      expect(root.innerHTML).toBe(`ok`)
+      expect(app._instance).toBeNull()
+
+      expect(() => app.unmount()).not.toThrow()
+      expect(root.innerHTML).toBe(``)
+      expect(app._instance).toBeNull()
+    } finally {
+      __DEV__ = true
+    }
+  })
+
+  test('ssr mount should fall back to full mount when container is empty', () => {
+    const Comp = defineVaporComponent({
+      setup() {
+        return createTextNode('hello')
+      },
+    })
+
+    const root = document.createElement('div')
+    const app = createVaporSSRApp(Comp)
+
+    expect(() => app.mount(root)).not.toThrow()
+    expect(root.innerHTML).toBe(`hello`)
+    expect(
+      `Attempting to hydrate existing markup but container is empty. Performing full mount instead.`,
+    ).toHaveBeenWarned()
+  })
+
+  test('provide', () => {
+    const Root = define({
+      setup() {
+        // test override
+        provide('foo', 3)
+        return createComponent(Child)
+      },
+    })
+
+    const Child = defineVaporComponent({
+      setup() {
+        const foo = inject('foo')
+        const bar = inject('bar')
+        try {
+          inject('__proto__')
+        } catch (e: any) {}
+        return createTextNode(`${foo},${bar}`)
+      },
+    })
+
+    const { app, mount, create, html } = Root.create()
+    app.provide('foo', 1)
+    app.provide('bar', 2)
+    mount()
+    expect(html()).toBe(`3,2`)
+    expect('[Vue warn]: injection "__proto__" not found.').toHaveBeenWarned()
+
+    const { app: app2 } = create()
+    app2.provide('bar', 1)
+    app2.provide('bar', 2)
+    expect(`App already provides property with key "bar".`).toHaveBeenWarned()
+  })
+
+  test('runWithContext', () => {
+    const { app } = define({
+      setup() {
+        provide('foo', 'should not be seen')
+        return document.createElement('div')
+      },
+    }).create()
+    app.provide('foo', 1)
+
+    expect(app.runWithContext(() => inject('foo'))).toBe(1)
+
+    expect(
+      app.runWithContext(() => {
+        app.runWithContext(() => {})
+        return inject('foo')
+      }),
+    ).toBe(1)
+
+    // ensure the context is restored
+    inject('foo')
+    expect('inject() can only be used inside setup').toHaveBeenWarned()
+  })
+
+  test('component', () => {
+    const { app, mount, host } = define({
+      setup() {
+        const FooBar = resolveComponent('foo-bar') as VaporComponent
+        const BarBaz = resolveComponent('bar-baz') as VaporComponent
+        return [createComponent(FooBar), createComponent(BarBaz)]
+      },
+    }).create()
+
+    const FooBar = () => createTextNode('foobar!')
+    app.component('FooBar', FooBar)
+    expect(app.component('FooBar')).toBe(FooBar)
+
+    app.component('BarBaz', () => createTextNode('barbaz!'))
+    app.component('BarBaz', () => createTextNode('barbaz!'))
+    expect(
+      'Component "BarBaz" has already been registered in target app.',
+    ).toHaveBeenWarnedTimes(1)
+
+    mount()
+    expect(host.innerHTML).toBe(`foobar!barbaz!`)
+  })
+
+  test('directive', () => {
+    const spy1 = vi.fn()
+    const spy2 = vi.fn()
+
+    const { app, mount } = define({
+      setup() {
+        const FooBar = resolveDirective('foo-bar') as VaporDirective
+        const BarBaz = resolveDirective('bar-baz') as VaporDirective
+        const n0 = template('<div></div>')() as Element
+        withVaporDirectives(n0, [[FooBar], [BarBaz]])
+        return n0
+      },
+    }).create()
+
+    const FooBar = spy1
+    app.directive('FooBar', FooBar)
+    expect(app.directive('FooBar')).toBe(FooBar)
+
+    app.directive('BarBaz', spy2)
+    app.directive('BarBaz', spy2)
+    expect(
+      'Directive "BarBaz" has already been registered in target app.',
+    ).toHaveBeenWarnedTimes(1)
+
+    mount()
+    expect(spy1).toHaveBeenCalled()
+    expect(spy2).toHaveBeenCalled()
+
+    app.directive('bind', FooBar)
+    expect(
+      `Do not use built-in directive ids as custom directive id: bind`,
+    ).toHaveBeenWarned()
+  })
+
+  test('use', () => {
+    const PluginA: Plugin = app => app.provide('foo', 1)
+    const PluginB: Plugin = {
+      install: (app, arg1, arg2) => app.provide('bar', arg1 + arg2),
+    }
+    class PluginC {
+      someProperty = {}
+      static install() {
+        app.provide('baz', 2)
+      }
+    }
+    const PluginD: any = undefined
+
+    const { app, host, mount } = define({
+      setup() {
+        const foo = inject('foo')
+        const bar = inject('bar')
+        return document.createTextNode(`${foo},${bar}`)
+      },
+    }).create()
+
+    app.use(PluginA)
+    app.use(PluginB, 1, 1)
+    app.use(PluginC)
+
+    mount()
+    expect(host.innerHTML).toBe(`1,2`)
+
+    app.use(PluginA)
+    expect(
+      `Plugin has already been applied to target app`,
+    ).toHaveBeenWarnedTimes(1)
+
+    app.use(PluginD)
+    expect(
+      `A plugin must either be a function or an object with an "install" ` +
+        `function.`,
+    ).toHaveBeenWarnedTimes(1)
+  })
+
+  test('config.errorHandler', () => {
+    const error = new Error()
+    let instance: GenericComponentInstance
+
+    const handler = vi.fn((err, _instance, info) => {
+      expect(err).toBe(error)
+      expect(_instance).toBe(instance)
+      expect(info).toBe(`render function`)
+    })
+
+    const { app, mount } = define({
+      setup() {
+        instance = currentInstance!
+        return {}
+      },
+      render() {
+        throw error
+      },
+    }).create()
+    app.config.errorHandler = handler
+    mount()
+    expect(handler).toHaveBeenCalled()
+  })
+
+  test('config.warnHandler', () => {
+    let instance: GenericComponentInstance
+
+    const handler = vi.fn((msg, _instance, trace) => {
+      expect(msg).toMatch(`warn message`)
+      expect(_instance).toBe(instance)
+      expect(trace).toMatch(`Hello`)
+    })
+
+    const { app, mount } = define({
+      name: 'Hello',
+      setup() {
+        instance = currentInstance!
+        warn('warn message')
+        return []
+      },
+    }).create()
+
+    app.config.warnHandler = handler
+    mount()
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  describe('config.isNativeTag', () => {
+    const isNativeTag = vi.fn(tag => tag === 'div')
+
+    // Not relevant for vapor
+    // test('Component.name', () => {
+    //   const { app, mount } = define({
+    //     name: 'div',
+    //     render(): any {},
+    //   }).create()
+
+    //   Object.defineProperty(app.config, 'isNativeTag', {
+    //     value: isNativeTag,
+    //     writable: false,
+    //   })
+
+    //   mount()
+    //   expect(
+    //     `Do not use built-in or reserved HTML elements as component id: div`,
+    //   ).toHaveBeenWarned()
+    // })
+
+    test('register using app.component', () => {
+      const { app, mount } = define({
+        render(): any {},
+      }).create()
+
+      Object.defineProperty(app.config, 'isNativeTag', {
+        value: isNativeTag,
+        writable: false,
+      })
+
+      app.component('div', () => createTextNode('div'))
+      mount()
+      expect(
+        `Do not use built-in or reserved HTML elements as component id: div`,
+      ).toHaveBeenWarned()
+    })
+  })
+
+  test('warns when a template reads app.config.globalProperties', () => {
+    const { app, mount, html } = define({
+      setup() {
+        return {}
+      },
+      render: compileToVaporRender('<div>{{ $message }}</div>'),
+    }).create()
+    app.config.globalProperties.$message = undefined
+    expect(console.warn).not.toHaveBeenCalled()
+    mount()
+    expect(html()).toBe('<div></div>')
+    expect(
+      'Property "$message" is provided via app.config.globalProperties, which is not supported in Vapor components.',
+    ).toHaveBeenWarnedTimes(1)
+    expect('but is not defined on instance').not.toHaveBeenWarned()
+    app.unmount()
+  })
+
+  test.each([false, true])(
+    'only warns for Vapor template access in mixed apps (vapor root: %s)',
+    vapor => {
+      const Vdom = compile(
+        '<script setup>const unused = 0</script><template><span>{{ $message }}</span></template>',
+        ref(null),
+        {},
+        { vapor: false },
+      )
+      const Vapor = defineVaporComponent({
+        setup() {
+          return {}
+        },
+        render: compileToVaporRender('<span>{{ $message }}</span>'),
+      })
+      const Root = compile(
+        '<script setup>const { Vdom, Vapor } = _components</script><template><div><Vdom /><Vapor /></div></template>',
+        ref(null),
+        { Vdom, Vapor },
+        { vapor },
+      )
+      const host = document.createElement('div')
+      const app = (vapor ? createVaporApp(Root) : createApp(Root)).use(
+        vaporInteropPlugin,
+      )
+      app.config.globalProperties.$message = 'global'
+      app.mount(host)
+      expect(host.innerHTML).toBe('<div><span>global</span><span></span></div>')
+      expect(
+        'Property "$message" is provided via app.config.globalProperties, which is not supported in Vapor components.',
+      ).toHaveBeenWarnedTimes(1)
+      expect('but is not defined on instance').not.toHaveBeenWarned()
+      app.unmount()
+    },
+  )
+
+  test('does not warn for setup bindings shadowing global properties', () => {
+    const { app, mount, html } = define({
+      setup() {
+        return { $message: 'local' }
+      },
+      render: compileToVaporRender('<div>{{ $message }}</div>'),
+    }).create()
+    app.config.globalProperties.$message = 'global'
+    app.config.globalProperties.$unused = 'unused'
+    mount()
+    expect(html()).toBe('<div>local</div>')
+    expect(console.warn).not.toHaveBeenCalled()
+    app.unmount()
+  })
+
+  test.each([false, true])(
+    'config.warnHandler receives warnings raised during an update (vapor: %s)',
+    async vapor => {
+      const data = ref({ show: false })
+      const components: Record<string, any> = {}
+      components.Child = compile(
+        `<script setup>defineOptions({ name: 'Child' }); const data = _data</script>` +
+          `<template><div v-if="data.show">{{ missing }}</div></template>`,
+        data,
+        components,
+        { vapor, inlineTemplate: false },
+      )
+      const App = compile(
+        `<script setup>defineOptions({ name: 'App' }); const { Child } = _components</script>` +
+          `<template><Child /></template>`,
+        data,
+        components,
+        { vapor, inlineTemplate: false },
+      )
+      const handler = vi.fn()
+      const app = vapor ? createVaporApp(App) : createApp(App)
+      app.config.warnHandler = handler
+      app.mount(document.createElement('div'))
+
+      data.value.show = true
+      await nextTick()
+      expect(handler).toHaveBeenCalledTimes(1)
+      expect(handler.mock.calls[0][0]).toMatch(
+        'Property "missing" was accessed during render',
+      )
+      expect(handler.mock.calls[0][2]).toBe('at <Child>\nat <App>')
+      app.unmount()
+    },
+  )
+
+  test.each([false, true])(
+    'config.performance traces branch effects without breaking the render (vapor: %s)',
+    async vapor => {
+      const data = ref({ show: true, list: [1] })
+      const App = compile(
+        `<script setup>const data = _data</script>` +
+          `<template><div v-if="data.show">{{ data.list.length }}</div>` +
+          `<i v-for="n in data.list">{{ n }}</i></template>`,
+        data,
+        {},
+        { vapor },
+      )
+      const handler = vi.fn()
+      const root = document.createElement('div')
+      const app = vapor ? createVaporApp(App) : createApp(App)
+      app.config.performance = true
+      app.config.errorHandler = handler
+      app.mount(root)
+      expect(root.textContent).toBe('11')
+
+      data.value.list.push(2)
+      await nextTick()
+      data.value.show = false
+      await nextTick()
+      data.value.show = true
+      await nextTick()
+      expect(root.textContent).toBe('212')
+      expect(handler).not.toHaveBeenCalled()
+      app.unmount()
+    },
+  )
+})

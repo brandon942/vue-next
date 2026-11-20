@@ -1,0 +1,329 @@
+import { EffectScope } from '@vue/reactivity'
+import {
+  type DirectiveModifiers,
+  ErrorCodes,
+  type GenericComponentInstance,
+  callWithErrorHandling,
+  currentInstance,
+  isAsyncWrapper,
+  onBeforeMount,
+  onScopeDispose,
+  restoreCurrentInstance,
+  setCurrentInstance,
+  warn,
+} from '@vue/runtime-dom'
+import { type Block, EMPTY_BLOCK, isValidSlot } from '../block'
+import {
+  type RootChainVisitor,
+  type VaporComponentInstance,
+  getRootElement,
+  registerRootHook,
+  staleRootHooks,
+} from '../component'
+import { isAsyncComponentEnabled } from '../asyncComponentState'
+import {
+  type VaporFragment,
+  endsRootChain,
+  isDynamicFragment,
+  isFragment,
+  isSlotOutletFragment,
+} from '../fragment'
+import { inOnce, withOnce } from '../once'
+import { isInteropEnabled } from '../vdomInteropState'
+import { isSuspenseEnabled } from '../suspense'
+import { isKeepAliveEnabled } from '../keepAlive'
+import { isFunction, isObject } from '@vue/shared'
+
+// !! vapor directive is different from vdom directives
+export type VaporDirective<
+  HostElement extends Element = Element,
+  Value = any,
+  Modifiers extends string = string,
+  Arg = any,
+> = (
+  node: HostElement,
+  value?: () => Value,
+  argument?: () => Arg,
+  modifiers?: DirectiveModifiers<Modifiers>,
+) => (() => void) | void
+
+type AnyVaporDirective = VaporDirective<any>
+
+type VaporDirectiveArguments = Array<
+  | [AnyVaporDirective | undefined]
+  | [AnyVaporDirective | undefined, () => any]
+  | [
+      AnyVaporDirective | undefined,
+      (() => any) | undefined,
+      argument: () => any,
+    ]
+  | [
+      AnyVaporDirective | undefined,
+      value: (() => any) | undefined,
+      argument: (() => any) | undefined,
+      modifiers: DirectiveModifiers,
+    ]
+>
+
+export function withVaporDirectives(
+  node: Element | VaporComponentInstance | VaporFragment,
+  dirs: VaporDirectiveArguments,
+): void {
+  // Element targets are stable, so apply synchronously in the current scope
+  if (node instanceof Element) {
+    applyDirectivesToElement(node, dirs, currentInstance)
+    return
+  }
+
+  const instance = currentInstance
+  // Deferred (re)application keeps the once ambient it was created under.
+  const once = inOnce
+  let currentElement: Element | null | undefined = null
+  let directiveScope: EffectScope | undefined
+  let disposed = false
+  // Set by a descent that met a root which cannot resolve yet.
+  let pending = false
+  let pendingSetups: WeakSet<VaporComponentInstance> | undefined
+
+  // The block an outlet hands over, until the descent meets that outlet.
+  let exposing: Block | undefined
+  // Set by a descent that met an outlet with nothing valid to show: its
+  // fallback, if any, is exposed next.
+  let empty = false
+
+  const visitor: RootChainVisitor = {
+    onDynamicFragment(frag) {
+      if (isSlotOutletFragment(frag)) {
+        // a fragment root in vdom: nothing for directives to land on
+        if (endsRootChain(frag)) return true
+        // An outlet settles the branch it exposes (content or fallback) after
+        // its own update: it hands over each block it is about to expose.
+        registerRootHook((frag.bm ||= []), applyExposed)
+        registerRootHook((frag.bu ||= []), release)
+        // Handed over as it renders or exposes it: its `nodes` by then.
+        if (exposing && frag.nodes === exposing) {
+          exposing = undefined
+          return true
+        }
+        if (!isValidSlot(frag.nodes)) empty = true
+      } else {
+        track(frag)
+      }
+    },
+    onComponent(block) {
+      if (__DEV__) {
+        registerRootHook((block.hmrRootHooks ||= []), applyDirectives)
+      }
+      if (
+        __FEATURE_SUSPENSE__ &&
+        isSuspenseEnabled &&
+        block.asyncDep &&
+        !block.asyncResolved
+      ) {
+        pending = true
+        if (!(pendingSetups ||= new WeakSet()).has(block)) {
+          pendingSetups.add(block)
+          // Suspense replaces the pending block before the component's first mount
+          onBeforeMount(applyDirectives, block)
+        }
+        return true
+      }
+      // Async wrappers keep an empty fragment until a renderable branch is available
+      if (isAsyncComponentEnabled && isAsyncWrapper(block)) {
+        const inner = block.block
+        if (isFragment(inner) && inner.nodes === EMPTY_BLOCK) pending = true
+      }
+    },
+  }
+  if (isInteropEnabled) {
+    visitor.onInteropFragment = frag => {
+      if (isSlotOutletFragment(frag)) return true
+      // Interop content resolves its nodes on `syncNodes`
+      if (frag.nodes === EMPTY_BLOCK) pending = true
+      track(frag)
+    }
+  }
+
+  function stopDirectiveScope() {
+    if (directiveScope) {
+      directiveScope.stop()
+      directiveScope = undefined
+    }
+  }
+
+  function track(frag: VaporFragment): void {
+    // Re-resolve the root element when the fragment updates
+    registerRootHook((frag.u ||= []), applyDirectives)
+    // A branch switch discards its root: release it while it is still in the
+    // DOM (vdom beforeUnmount). Interop fragments update on every vdom
+    // re-render and usually keep their root, so they only re-resolve.
+    if (isDynamicFragment(frag)) registerRootHook((frag.bu ||= []), release)
+  }
+
+  function release(nodes: Block): void {
+    // Fragments off the chain (a deactivated KeepAlive branch) keep it
+    if (currentElement && getRootElement(nodes) === currentElement) {
+      currentElement = null
+      stopDirectiveScope()
+    }
+  }
+
+  function applyDirectives() {
+    apply(node)
+  }
+
+  function applyExposed(nodes: Block) {
+    if (disposed) return
+    // An outlet off the root chain (a deactivated KeepAlive branch) goes on
+    // exposing out of the DOM: only one on the chain hands its branch over.
+    exposing = nodes
+    getRootElement(node, visitor)
+    if (exposing) exposing = undefined
+    else apply(nodes, true)
+  }
+
+  function apply(block: Block, exposed?: boolean) {
+    if (disposed) return
+
+    pending = empty = false
+    const element = getRootElement(block, visitor)
+    // Not a root to warn about, nor one that replaces the current root
+    if (!element && (empty || (exposed && !isValidSlot(block)))) return
+    if (!element && pending) {
+      // Keep null as the pending state so a resolved invalid root still warns
+      if (currentElement !== null) {
+        currentElement = null
+        stopDirectiveScope()
+      }
+      return
+    }
+    // Only re-apply when the root element changes
+    if (element === currentElement) return
+
+    currentElement = element
+    // The previous root element is no longer directive's target
+    // Dispose effects and cleanup bound to the previous root element
+    stopDirectiveScope()
+
+    if (!element) {
+      if (__DEV__) {
+        warn(
+          `Runtime directive used on component with non-element root node. ` +
+            `The directives will not function as intended.`,
+        )
+      }
+      return
+    }
+
+    // The fragment makes the root element mutable without disposing the owner scope
+    // So directive effects and cleanup need a replaceable detached scope
+    directiveScope = new EffectScope(true)
+    // Re-apply in the original directive owner's component context
+    const prev = setCurrentInstance(instance, directiveScope)
+    try {
+      if (once) {
+        withOnce(() => applyDirectivesToElement(element, dirs, instance))
+      } else {
+        applyDirectivesToElement(element, dirs, instance)
+      }
+    } finally {
+      restoreCurrentInstance(prev)
+    }
+  }
+
+  onScopeDispose(() => {
+    disposed = true
+    // Stop the detached scope when the calling scope is disposed
+    stopDirectiveScope()
+    // A kept-alive root chain outlives the branch render that bound it: the
+    // hooks left there must not pin the root.
+    currentElement = null
+    if (isKeepAliveEnabled) {
+      staleRootHooks.add(applyDirectives)
+      staleRootHooks.add(applyExposed)
+      staleRootHooks.add(release)
+    }
+  }, true)
+
+  applyDirectives()
+}
+
+function applyDirectivesToElement(
+  element: Element,
+  dirs: VaporDirectiveArguments,
+  instance: GenericComponentInstance | null,
+): void {
+  const hookCounts = __DEV__ && instance ? countLifecycleHooks(instance) : null
+  for (const [dir, value, argument, modifiers] of dirs) {
+    if (dir) {
+      if (!isFunction(dir)) {
+        if (__DEV__) {
+          warn(
+            `Received a VDOM object directive` +
+              (isObject(dir)
+                ? ` (hooks: ${Object.keys(dir).join(', ')})`
+                : ``) +
+              ` in a Vapor template. Vapor directives must be a function: ` +
+              `(el, value, arg, modifiers) => cleanup.`,
+          )
+        }
+        continue
+      }
+      const ret = callWithErrorHandling(
+        dir,
+        instance,
+        ErrorCodes.DIRECTIVE_HOOK,
+        [element, value, argument, modifiers],
+      )
+      if (ret) {
+        onScopeDispose(() =>
+          callWithErrorHandling(ret, instance, ErrorCodes.DIRECTIVE_HOOK),
+        )
+      }
+    }
+  }
+  if (__DEV__ && hookCounts) warnLifecycleHooks(instance!, hookCounts)
+}
+
+// Lifecycle hooks are not supported inside a directive: they would attach to
+// the owner instance, not the element. Dev-only detection by hook count.
+const lifecycleHookNames: Record<string, string> = __DEV__
+  ? {
+      bm: 'onBeforeMount',
+      m: 'onMounted',
+      bu: 'onBeforeUpdate',
+      u: 'onUpdated',
+      bum: 'onBeforeUnmount',
+      um: 'onUnmounted',
+      da: 'onDeactivated',
+      a: 'onActivated',
+    }
+  : {}
+
+function countLifecycleHooks(instance: GenericComponentInstance): number[] {
+  const counts: number[] = []
+  for (const key in lifecycleHookNames) {
+    const hooks = (instance as any)[key]
+    counts.push(hooks ? hooks.length : 0)
+  }
+  return counts
+}
+
+function warnLifecycleHooks(
+  instance: GenericComponentInstance,
+  before: number[],
+): void {
+  let i = 0
+  for (const key in lifecycleHookNames) {
+    const hooks = (instance as any)[key]
+    if (hooks && hooks.length > before[i]) {
+      warn(
+        `${lifecycleHookNames[key]}() was called inside a custom directive. ` +
+          `Lifecycle hooks are not supported in Vapor directives: they attach to ` +
+          `the component, not the element. Use watchPostEffect() for work that ` +
+          `needs the element in the DOM, and return a cleanup function for teardown.`,
+      )
+    }
+    i++
+  }
+}

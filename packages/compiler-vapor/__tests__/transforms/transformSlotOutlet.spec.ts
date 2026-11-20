@@ -1,0 +1,459 @@
+import { ErrorCodes, NodeTypes } from '@vue/compiler-dom'
+import { VaporSlotFlags } from '@vue/shared'
+import {
+  IRNodeTypes,
+  transformChildren,
+  transformElement,
+  transformSlotOutlet,
+  transformText,
+  transformVBind,
+  transformVFor,
+  transformVIf,
+  transformVOn,
+  transformVShow,
+} from '../../src'
+import { makeCompile } from './_utils'
+
+const slotNoSlottedFlag = `${VaporSlotFlags.NO_SLOTTED} /* NO_SLOTTED */`
+
+const compileWithSlotsOutlet = makeCompile({
+  nodeTransforms: [
+    transformText,
+    transformVIf,
+    transformVFor,
+    transformSlotOutlet,
+    transformElement,
+    transformChildren,
+  ],
+  directiveTransforms: {
+    bind: transformVBind,
+    on: transformVOn,
+    show: transformVShow,
+  },
+})
+
+describe('compiler: transform <slot> outlets', () => {
+  test('default slot outlet', () => {
+    const { ir, code, helpers } = compileWithSlotsOutlet(`<slot />`)
+    expect(code).toContain(`const n0 = _createSlot()`)
+    expect(code).toMatchSnapshot()
+    expect(helpers).toContain('createSlot')
+    expect(ir.block.effect).toEqual([])
+    expect(ir.block.dynamic.children[0].operation).toMatchObject({
+      type: IRNodeTypes.SLOT_OUTLET_NODE,
+      id: 0,
+      name: {
+        type: NodeTypes.SIMPLE_EXPRESSION,
+        content: 'default',
+        isStatic: true,
+      },
+      props: [],
+      fallback: undefined,
+    })
+  })
+
+  test('statically named slot outlet', () => {
+    const { ir, code } = compileWithSlotsOutlet(`<slot name="foo" />`)
+    expect(code).toMatchSnapshot()
+    expect(ir.block.dynamic.children[0].operation).toMatchObject({
+      type: IRNodeTypes.SLOT_OUTLET_NODE,
+      id: 0,
+      name: {
+        type: NodeTypes.SIMPLE_EXPRESSION,
+        content: 'foo',
+        isStatic: true,
+      },
+    })
+  })
+
+  test('dynamically named slot outlet', () => {
+    const { ir, code } = compileWithSlotsOutlet(`<slot :name="foo + bar" />`)
+    expect(code).toMatchSnapshot()
+    expect(ir.block.dynamic.children[0].operation).toMatchObject({
+      type: IRNodeTypes.SLOT_OUTLET_NODE,
+      id: 0,
+      name: {
+        type: NodeTypes.SIMPLE_EXPRESSION,
+        content: 'foo + bar',
+        isStatic: false,
+      },
+    })
+  })
+
+  test('dynamically named slot outlet with v-bind shorthand', () => {
+    const { ir, code } = compileWithSlotsOutlet(`<slot :name />`)
+    expect(code).toMatchSnapshot()
+    expect(ir.block.dynamic.children[0].operation).toMatchObject({
+      type: IRNodeTypes.SLOT_OUTLET_NODE,
+      id: 0,
+      name: {
+        type: NodeTypes.SIMPLE_EXPRESSION,
+        content: 'name',
+        isStatic: false,
+      },
+    })
+  })
+
+  test('default slot outlet with props', () => {
+    const { ir, code } = compileWithSlotsOutlet(
+      `<slot foo="bar" :baz="qux" :foo-bar="foo-bar" />`,
+    )
+    expect(code).toContain(`foo: "bar"`)
+    expect(code).toContain(`baz: () => (_ctx.qux)`)
+    expect(code).toContain(`fooBar: () => (_ctx.foo-_ctx.bar)`)
+    expect(code).toMatchSnapshot()
+    expect(ir.block.dynamic.children[0].operation).toMatchObject({
+      type: IRNodeTypes.SLOT_OUTLET_NODE,
+      name: { content: 'default' },
+      props: [
+        [
+          { key: { content: 'foo' }, values: [{ content: 'bar' }] },
+          { key: { content: 'baz' }, values: [{ content: 'qux' }] },
+          { key: { content: 'fooBar' }, values: [{ content: 'foo-bar' }] },
+        ],
+      ],
+    })
+  })
+
+  test('statically named slot outlet with props', () => {
+    const { ir, code } = compileWithSlotsOutlet(
+      `<slot name="foo" foo="bar" :baz="qux" />`,
+    )
+    expect(code).toContain(`foo: "bar"`)
+    expect(code).toContain(`baz: () => (_ctx.qux)`)
+    expect(code).toMatchSnapshot()
+    expect(ir.block.dynamic.children[0].operation).toMatchObject({
+      type: IRNodeTypes.SLOT_OUTLET_NODE,
+      name: { content: 'foo' },
+      props: [
+        [
+          { key: { content: 'foo' }, values: [{ content: 'bar' }] },
+          { key: { content: 'baz' }, values: [{ content: 'qux' }] },
+        ],
+      ],
+    })
+  })
+
+  test('slot outlet with number literal props', () => {
+    // slot props are passed along as raw values, so number literals must not
+    // be stringified the way they are for plain element attributes
+    const { code } = compileWithSlotsOutlet(
+      `<slot :count="0" :level="1" :ratio="1.5" :str="'1'" />`,
+    )
+    expect(code).toContain(`count: 0`)
+    expect(code).toContain(`level: 1`)
+    expect(code).toContain(`ratio: 1.5`)
+    expect(code).toContain(`str: "1"`)
+    expect(code).toMatchSnapshot()
+  })
+
+  test('statically named slot outlet with v-bind="obj"', () => {
+    const { ir, code } = compileWithSlotsOutlet(
+      `<slot name="foo" foo="bar" v-bind="obj" :baz="qux" />`,
+    )
+    expect(code).toMatchSnapshot()
+    expect(ir.block.dynamic.children[0].operation).toMatchObject({
+      type: IRNodeTypes.SLOT_OUTLET_NODE,
+      name: { content: 'foo' },
+      props: [
+        [{ key: { content: 'foo' }, values: [{ content: 'bar' }] }],
+        { value: { content: 'obj', isStatic: false } },
+        [{ key: { content: 'baz' }, values: [{ content: 'qux' }] }],
+      ],
+    })
+  })
+
+  test('statically named slot outlet with v-on', () => {
+    const { ir, code } = compileWithSlotsOutlet(
+      `<slot @click="foo" v-on="bar" :baz="qux" />`,
+    )
+    expect(code).toMatchSnapshot()
+    expect(ir.block.dynamic.children[0].operation).toMatchObject({
+      type: IRNodeTypes.SLOT_OUTLET_NODE,
+      props: [
+        [{ key: { content: 'click' }, values: [{ content: 'foo' }] }],
+        { value: { content: 'bar' }, handler: true },
+        [{ key: { content: 'baz' }, values: [{ content: 'qux' }] }],
+      ],
+    })
+  })
+
+  test('default slot outlet with fallback', () => {
+    const { ir, code } = compileWithSlotsOutlet(`<slot><div/></slot>`)
+    expect(code).toMatchSnapshot()
+    expect([...ir.template.keys()][0]).toBe('<div>')
+    expect(ir.block.dynamic.children[0].operation).toMatchObject({
+      type: IRNodeTypes.SLOT_OUTLET_NODE,
+      id: 0,
+      name: { content: 'default' },
+      fallback: {
+        type: IRNodeTypes.BLOCK,
+        dynamic: {
+          children: [{ template: 0, id: 2 }],
+        },
+        returns: [2],
+      },
+    })
+  })
+
+  test('named slot outlet with fallback', () => {
+    const { ir, code } = compileWithSlotsOutlet(
+      `<slot name="foo"><div/></slot>`,
+    )
+    expect(code).toMatchSnapshot()
+    expect([...ir.template.keys()][0]).toBe('<div>')
+    expect(ir.block.dynamic.children[0].operation).toMatchObject({
+      type: IRNodeTypes.SLOT_OUTLET_NODE,
+      id: 0,
+      name: { content: 'foo' },
+      fallback: {
+        type: IRNodeTypes.BLOCK,
+        dynamic: {
+          children: [{ template: 0, id: 2 }],
+        },
+        returns: [2],
+      },
+    })
+  })
+
+  test('default slot outlet with props & fallback', () => {
+    const { ir, code } = compileWithSlotsOutlet(
+      `<slot :foo="bar"><div/></slot>`,
+    )
+    expect(code).toMatchSnapshot()
+    expect([...ir.template.keys()][0]).toBe('<div>')
+    expect(ir.block.dynamic.children[0].operation).toMatchObject({
+      type: IRNodeTypes.SLOT_OUTLET_NODE,
+      id: 0,
+      name: { content: 'default' },
+      props: [[{ key: { content: 'foo' }, values: [{ content: 'bar' }] }]],
+      fallback: {
+        type: IRNodeTypes.BLOCK,
+        dynamic: {
+          children: [{ template: 0, id: 2 }],
+        },
+        returns: [2],
+      },
+    })
+  })
+
+  test('named slot outlet with props & fallback', () => {
+    const { ir, code } = compileWithSlotsOutlet(
+      `<slot name="foo" :foo="bar"><div/></slot>`,
+    )
+    expect(code).toMatchSnapshot()
+    expect([...ir.template.keys()][0]).toBe('<div>')
+    expect(ir.block.dynamic.children[0].operation).toMatchObject({
+      type: IRNodeTypes.SLOT_OUTLET_NODE,
+      id: 0,
+      name: { content: 'foo' },
+      props: [[{ key: { content: 'foo' }, values: [{ content: 'bar' }] }]],
+      fallback: {
+        type: IRNodeTypes.BLOCK,
+        dynamic: {
+          children: [{ template: 0, id: 2 }],
+        },
+        returns: [2],
+      },
+    })
+  })
+
+  test('root v-if fallback', () => {
+    const { code } = compileWithSlotsOutlet(`<slot><span v-if="ok"/></slot>`)
+
+    expect(code).toMatchSnapshot()
+  })
+
+  test('nested root v-for fallback', () => {
+    const { code } = compileWithSlotsOutlet(
+      `<slot><template v-if="ok"><span v-for="item in items">{{ item }}</span></template></slot>`,
+    )
+
+    expect(code).toMatchSnapshot()
+  })
+
+  test('does not mark non-root fallback v-if as slot root', () => {
+    const { code } = compileWithSlotsOutlet(
+      `<slot><div><span v-if="ok"/></div></slot>`,
+    )
+
+    expect(code).toMatchSnapshot()
+  })
+
+  test('root dynamic component fallback', () => {
+    const { code } = compileWithSlotsOutlet(
+      `<slot><component :is="view" /></slot>`,
+    )
+
+    expect(code).toMatchSnapshot()
+  })
+
+  test('error on unexpected custom directive on <slot>', () => {
+    const onError = vi.fn()
+    const source = `<slot v-foo />`
+    const index = source.indexOf('v-foo')
+    const { code } = compileWithSlotsOutlet(source, { onError })
+    expect(code).toMatchSnapshot()
+    expect(onError.mock.calls[0][0]).toMatchObject({
+      code: ErrorCodes.X_V_SLOT_UNEXPECTED_DIRECTIVE_ON_SLOT_OUTLET,
+      loc: {
+        start: {
+          offset: index,
+          line: 1,
+          column: index + 1,
+        },
+        end: {
+          offset: index + 5,
+          line: 1,
+          column: index + 6,
+        },
+      },
+    })
+  })
+
+  test('error on unexpected custom directive with v-show on <slot>', () => {
+    const onError = vi.fn()
+    const source = `<slot v-show="ok" />`
+    const index = source.indexOf('v-show="ok"')
+    const { code } = compileWithSlotsOutlet(source, { onError })
+    expect(code).toMatchSnapshot()
+    expect(onError.mock.calls[0][0]).toMatchObject({
+      code: ErrorCodes.X_V_SLOT_UNEXPECTED_DIRECTIVE_ON_SLOT_OUTLET,
+      loc: {
+        start: {
+          offset: index,
+          line: 1,
+          column: index + 1,
+        },
+        end: {
+          offset: index + 11,
+          line: 1,
+          column: index + 12,
+        },
+      },
+    })
+  })
+
+  test('slot outlet with scopeId and slotted=false should generate noSlotted', () => {
+    const { ir, code } = compileWithSlotsOutlet(`<slot />`, {
+      scopeId: 'test-scope',
+      slotted: false,
+    })
+    expect(code).toMatchSnapshot()
+    expect(code).toContain(slotNoSlottedFlag)
+    expect(ir.block.dynamic.children[0].operation).toMatchObject({
+      type: IRNodeTypes.SLOT_OUTLET_NODE,
+      id: 0,
+      name: {
+        type: NodeTypes.SIMPLE_EXPRESSION,
+        content: 'default',
+        isStatic: true,
+      },
+      props: [],
+      fallback: undefined,
+      flags: VaporSlotFlags.NO_SLOTTED,
+    })
+  })
+
+  test('slot outlet with scopeId and slotted=true should not generate noSlotted', () => {
+    const { ir, code } = compileWithSlotsOutlet(`<slot />`, {
+      scopeId: 'test-scope',
+      slotted: true,
+    })
+    expect(code).toMatchSnapshot()
+    expect(ir.block.dynamic.children[0].operation).toMatchObject({
+      type: IRNodeTypes.SLOT_OUTLET_NODE,
+      id: 0,
+      name: {
+        type: NodeTypes.SIMPLE_EXPRESSION,
+        content: 'default',
+        isStatic: true,
+      },
+      props: [],
+      fallback: undefined,
+      flags: 0,
+    })
+  })
+
+  test('slot outlet with scopeId and slotted=undefined should not generate noSlotted', () => {
+    const { ir, code } = compileWithSlotsOutlet(`<slot />`, {
+      scopeId: 'test-scope',
+      slotted: undefined,
+    })
+    expect(code).not.toContain(slotNoSlottedFlag)
+    expect(ir.block.dynamic.children[0].operation).toMatchObject({
+      type: IRNodeTypes.SLOT_OUTLET_NODE,
+      flags: 0,
+    })
+  })
+
+  test('slot outlet without scopeId should not generate noSlotted', () => {
+    const { ir, code } = compileWithSlotsOutlet(`<slot />`, {
+      slotted: false,
+    })
+    expect(code).toMatchSnapshot()
+    expect(ir.block.dynamic.children[0].operation).toMatchObject({
+      type: IRNodeTypes.SLOT_OUTLET_NODE,
+      id: 0,
+      name: {
+        type: NodeTypes.SIMPLE_EXPRESSION,
+        content: 'default',
+        isStatic: true,
+      },
+      props: [],
+      fallback: undefined,
+      flags: 0,
+    })
+  })
+
+  test('normalizes static slot keys inside their own lazy getters', () => {
+    const { code, helpers } = compileWithSlotsOutlet(
+      `<slot :class="classes()" :style="styles()" :title="title()" />`,
+    )
+    expect(code).toContain(`class: () => (_normalizeClass(_ctx.classes()))`)
+    expect(code).toContain(`style: () => (_normalizeStyle(_ctx.styles()))`)
+    expect(code).toContain(`title: () => (_ctx.title())`)
+    expect(helpers).not.toContain('normalizeProps')
+    expect(helpers).not.toContain('mergeProps')
+  })
+
+  test('keeps modified class and style keys as ordinary props', () => {
+    const { code, helpers } = compileWithSlotsOutlet(
+      `<slot :class.prop="classes" :style.attr="styles" />`,
+    )
+    expect(code).toContain(`".class": () => (_ctx.classes)`)
+    expect(code).toContain(`"^style": () => (_ctx.styles)`)
+    expect(helpers).not.toContain('normalizeClass')
+    expect(helpers).not.toContain('normalizeStyle')
+  })
+
+  test.each([
+    [
+      `:style="s" v-bind="{ title: 't' }"`,
+      `_mergeProps({ style: _ctx.s }, { title: 't' })`,
+    ],
+    [
+      `v-bind="{ title: 't' }" :style="s"`,
+      `_mergeProps({ title: 't' }, { style: _ctx.s })`,
+    ],
+    [
+      `v-bind="{ class: c, style: s }"`,
+      `_normalizeProps(_guardReactiveProps({ class: _ctx.c, style: _ctx.s }))`,
+    ],
+    [
+      `class="a" :[key]="value"`,
+      `_normalizeProps({ class: "a", [_ctx.key || ""]: _ctx.value })`,
+    ],
+    [
+      `:[key]="value" class="a"`,
+      `_normalizeProps({ [_ctx.key || ""]: _ctx.value, class: "a" })`,
+    ],
+    [
+      `class="a" :[key]="value" v-bind="obj"`,
+      `_mergeProps({ class: "a", [_ctx.key || ""]: _ctx.value }, _ctx.obj)`,
+    ],
+  ])('preserves the normalization boundary for %s', (attrs, expression) => {
+    const { code } = compileWithSlotsOutlet(`<slot ${attrs} />`)
+    expect(code).toContain(`{ $: [() => (${expression})] }`)
+  })
+})

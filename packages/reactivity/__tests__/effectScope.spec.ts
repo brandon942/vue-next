@@ -1,0 +1,638 @@
+import { nextTick, watch, watchEffect } from '@vue/runtime-core'
+import {
+  type ComputedRef,
+  type ComputedRefImpl,
+  EffectScope,
+  ReactiveEffect,
+  type ReactiveEffectRunner,
+  computed,
+  effect,
+  effectScope,
+  getCurrentScope,
+  onEffectCleanup,
+  onScopeDispose,
+  reactive,
+  ref,
+  setCurrentScope,
+  stop,
+  toRaw,
+} from '../src'
+import { getDepFromReactive } from '../src/dep'
+
+describe('reactivity/effect/scope', () => {
+  it('should run', () => {
+    const fnSpy = vi.fn(() => {})
+    effectScope().run(fnSpy)
+    expect(fnSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('should accept zero argument', () => {
+    const scope = effectScope()
+    expect(getEffectsCount(scope)).toBe(0)
+  })
+
+  it('should return run value', () => {
+    expect(effectScope().run(() => 1)).toBe(1)
+  })
+
+  it('should work w/ active property', () => {
+    const scope = effectScope()
+    const src = computed(() => 1)
+    scope.run(() => src.value)
+    expect(scope.active).toBe(true)
+    scope.stop()
+    expect(scope.active).toBe(false)
+  })
+
+  it('should collect the effects', () => {
+    const scope = effectScope()
+    scope.run(() => {
+      let dummy
+      const counter = reactive({ num: 0 })
+      effect(() => (dummy = counter.num))
+
+      expect(dummy).toBe(0)
+      counter.num = 7
+      expect(dummy).toBe(7)
+    })
+
+    expect(getEffectsCount(scope)).toBe(1)
+  })
+
+  it('stop', () => {
+    let dummy, doubled
+    const counter = reactive({ num: 0 })
+
+    const scope = effectScope()
+    scope.run(() => {
+      effect(() => (dummy = counter.num))
+      effect(() => (doubled = counter.num * 2))
+    })
+
+    expect(getEffectsCount(scope)).toBe(2)
+
+    expect(dummy).toBe(0)
+    counter.num = 7
+    expect(dummy).toBe(7)
+    expect(doubled).toBe(14)
+
+    scope.stop()
+
+    counter.num = 6
+    expect(dummy).toBe(7)
+    expect(doubled).toBe(14)
+  })
+
+  it('should collect nested scope', () => {
+    let dummy, doubled
+    const counter = reactive({ num: 0 })
+
+    const scope = effectScope()
+    scope.run(() => {
+      effect(() => (dummy = counter.num))
+      // nested scope
+      effectScope().run(() => {
+        effect(() => (doubled = counter.num * 2))
+      })
+    })
+
+    expect(getEffectsCount(scope)).toBe(1)
+    expect(scope.deps?.nextDep?.dep).toBeInstanceOf(EffectScope)
+
+    expect(dummy).toBe(0)
+    counter.num = 7
+    expect(dummy).toBe(7)
+    expect(doubled).toBe(14)
+
+    // stop the nested scope as well
+    scope.stop()
+
+    counter.num = 6
+    expect(dummy).toBe(7)
+    expect(doubled).toBe(14)
+  })
+
+  it('nested scope can be escaped', () => {
+    let dummy, doubled
+    const counter = reactive({ num: 0 })
+
+    const scope = effectScope()
+    scope.run(() => {
+      effect(() => (dummy = counter.num))
+      // nested scope
+      effectScope(true).run(() => {
+        effect(() => (doubled = counter.num * 2))
+      })
+    })
+
+    expect(getEffectsCount(scope)).toBe(1)
+
+    expect(dummy).toBe(0)
+    counter.num = 7
+    expect(dummy).toBe(7)
+    expect(doubled).toBe(14)
+
+    scope.stop()
+
+    counter.num = 6
+    expect(dummy).toBe(7)
+
+    // nested scope should not be stopped
+    expect(doubled).toBe(12)
+  })
+
+  it('able to run the scope', () => {
+    let dummy, doubled
+    const counter = reactive({ num: 0 })
+
+    const scope = effectScope()
+    scope.run(() => {
+      effect(() => (dummy = counter.num))
+    })
+
+    expect(getEffectsCount(scope)).toBe(1)
+
+    scope.run(() => {
+      effect(() => (doubled = counter.num * 2))
+    })
+
+    expect(getEffectsCount(scope)).toBe(2)
+
+    counter.num = 7
+    expect(dummy).toBe(7)
+    expect(doubled).toBe(14)
+
+    scope.stop()
+  })
+
+  it('can not run an inactive scope', () => {
+    let dummy, doubled
+    const counter = reactive({ num: 0 })
+
+    const scope = effectScope()
+    scope.run(() => {
+      effect(() => (dummy = counter.num))
+    })
+
+    expect(getEffectsCount(scope)).toBe(1)
+
+    scope.stop()
+
+    expect(getEffectsCount(scope)).toBe(0)
+
+    scope.run(() => {
+      effect(() => (doubled = counter.num * 2))
+    })
+
+    expect(getEffectsCount(scope)).toBe(1)
+
+    counter.num = 7
+    expect(dummy).toBe(0)
+    expect(doubled).toBe(14)
+  })
+
+  it('should fire onScopeDispose hook', () => {
+    let dummy = 0
+
+    const scope = effectScope()
+    scope.run(() => {
+      onScopeDispose(() => (dummy += 1))
+      onScopeDispose(() => (dummy += 2))
+    })
+
+    scope.run(() => {
+      onScopeDispose(() => (dummy += 4))
+    })
+
+    expect(dummy).toBe(0)
+
+    scope.stop()
+    expect(dummy).toBe(7)
+  })
+
+  it('should run onScopeDispose callback immediately when scope is stopped', () => {
+    const before = vi.fn()
+    const after = vi.fn()
+    const scope = effectScope()
+    scope.run(() => {
+      onScopeDispose(before)
+      scope.stop()
+      onScopeDispose(after)
+    })
+
+    expect(before).toHaveBeenCalledTimes(1)
+    expect(after).toHaveBeenCalledTimes(1)
+  })
+
+  it('should warn onScopeDispose() is called when there is no active effect scope', () => {
+    const spy = vi.fn()
+    const scope = effectScope()
+    scope.run(() => {
+      onScopeDispose(spy)
+    })
+
+    expect(spy).toHaveBeenCalledTimes(0)
+
+    onScopeDispose(spy)
+
+    expect(
+      '[Vue warn] onScopeDispose() is called when there is no active effect scope to be associated with.',
+    ).toHaveBeenWarned()
+
+    scope.stop()
+    expect(spy).toHaveBeenCalledTimes(1)
+  })
+
+  it('should dereference child scope from parent scope after stopping child scope (no memleaks)', () => {
+    const parent = effectScope()
+    const child = parent.run(() => effectScope())!
+    expect(parent.deps?.dep).toBe(child)
+    child.stop()
+    expect(parent.deps).toBeUndefined()
+  })
+
+  it('test with higher level APIs', async () => {
+    const r = ref(1)
+
+    const computedSpy = vi.fn()
+    const watchSpy = vi.fn()
+    const watchEffectSpy = vi.fn()
+
+    let c: ComputedRef
+    const scope = effectScope()
+    scope.run(() => {
+      c = computed(() => {
+        computedSpy()
+        return r.value + 1
+      })
+
+      watch(r, watchSpy)
+      watchEffect(() => {
+        watchEffectSpy()
+        r.value
+        c.value
+      })
+    })
+
+    expect(computedSpy).toHaveBeenCalledTimes(1)
+    expect(watchSpy).toHaveBeenCalledTimes(0)
+    expect(watchEffectSpy).toHaveBeenCalledTimes(1)
+
+    r.value++
+    await nextTick()
+    expect(computedSpy).toHaveBeenCalledTimes(2)
+    expect(watchSpy).toHaveBeenCalledTimes(1)
+    expect(watchEffectSpy).toHaveBeenCalledTimes(2)
+
+    scope.stop()
+
+    r.value++
+    await nextTick()
+    // should not trigger anymore
+    expect(computedSpy).toHaveBeenCalledTimes(2)
+    expect(watchSpy).toHaveBeenCalledTimes(1)
+    expect(watchEffectSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('getCurrentScope() stays valid when running a detached nested EffectScope', () => {
+    const parentScope = effectScope()
+
+    parentScope.run(() => {
+      const currentScope = getCurrentScope()
+      expect(currentScope).toBeDefined()
+      const detachedScope = effectScope(true)
+      detachedScope.run(() => {})
+
+      expect(getCurrentScope()).toBe(currentScope)
+    })
+  })
+
+  it('calling .off() of a detached scope inside an active scope should not break currentScope', () => {
+    const parentScope = effectScope()
+
+    parentScope.run(() => {
+      const childScope = effectScope(true)
+      setCurrentScope(setCurrentScope(childScope))
+      expect(getCurrentScope()).toBe(parentScope)
+    })
+  })
+
+  it('should pause/resume EffectScope', async () => {
+    const counter = reactive({ num: 0 })
+    const fnSpy = vi.fn(() => counter.num)
+    const scope = new EffectScope()
+    scope.run(() => {
+      effect(fnSpy)
+    })
+
+    expect(fnSpy).toHaveBeenCalledTimes(1)
+
+    counter.num++
+    await nextTick()
+    expect(fnSpy).toHaveBeenCalledTimes(2)
+
+    scope.pause()
+    counter.num++
+    await nextTick()
+    expect(fnSpy).toHaveBeenCalledTimes(2)
+
+    counter.num++
+    await nextTick()
+    expect(fnSpy).toHaveBeenCalledTimes(2)
+
+    scope.resume()
+    expect(fnSpy).toHaveBeenCalledTimes(3)
+  })
+
+  test('removing a watcher while stopping its effectScope', async () => {
+    const count = ref(0)
+    const scope = effectScope()
+    let watcherCalls = 0
+    let cleanupCalls = 0
+
+    scope.run(() => {
+      const stop1 = watch(count, () => {
+        watcherCalls++
+      })
+      watch(count, (val, old, onCleanup) => {
+        watcherCalls++
+        onCleanup(() => {
+          cleanupCalls++
+          stop1()
+        })
+      })
+      watch(count, () => {
+        watcherCalls++
+      })
+    })
+
+    expect(watcherCalls).toBe(0)
+    expect(cleanupCalls).toBe(0)
+
+    count.value++
+    await nextTick()
+    expect(watcherCalls).toBe(3)
+    expect(cleanupCalls).toBe(0)
+
+    scope.stop()
+    count.value++
+    await nextTick()
+    expect(watcherCalls).toBe(3)
+    expect(cleanupCalls).toBe(1)
+
+    expect(getEffectsCount(scope)).toBe(0)
+    expect(scope.cleanupsLength).toBe(0)
+  })
+
+  it('should still trigger updates after stopping scope stored in reactive object', () => {
+    const rs = ref({
+      stage: 0,
+      scope: null as any,
+    })
+
+    let renderCount = 0
+    effect(() => {
+      renderCount++
+      return rs.value.stage
+    })
+
+    const handleBegin = () => {
+      const status = rs.value
+      status.stage = 1
+      status.scope = effectScope()
+      status.scope.run(() => {
+        watch([() => status.stage], () => {})
+      })
+    }
+
+    const handleExit = () => {
+      const status = rs.value
+      status.stage = 0
+      const watchScope = status.scope
+      status.scope = null
+      if (watchScope) {
+        watchScope.stop()
+      }
+    }
+
+    expect(rs.value.stage).toBe(0)
+    expect(renderCount).toBe(1)
+
+    // 1. Click begin
+    handleBegin()
+    expect(rs.value.stage).toBe(1)
+    expect(renderCount).toBe(2)
+
+    // 2. Click add
+    rs.value.stage++
+    expect(rs.value.stage).toBe(2)
+    expect(renderCount).toBe(3)
+
+    // 3. Click end
+    handleExit()
+    expect(rs.value.stage).toBe(0)
+    expect(renderCount).toBe(4)
+
+    handleBegin()
+    expect(rs.value.stage).toBe(1)
+    expect(renderCount).toBe(5)
+  })
+
+  it('should still trigger updates after stopping scope stored in reactive object', () => {
+    const rs = ref({
+      stage: 0,
+      scope: null as any,
+    })
+
+    let renderCount = 0
+    effect(() => {
+      renderCount++
+      return rs.value.stage
+    })
+
+    const handleBegin = () => {
+      const status = rs.value
+      status.stage = 1
+      status.scope = effectScope()
+      status.scope.run(() => {
+        watch([() => status.stage], () => {})
+      })
+    }
+
+    const handleExit = () => {
+      const status = rs.value
+      status.stage = 0
+      const watchScope = status.scope
+      status.scope = null
+      if (watchScope) {
+        watchScope.stop()
+      }
+    }
+
+    expect(rs.value.stage).toBe(0)
+    expect(renderCount).toBe(1)
+
+    // 1. Click begin
+    handleBegin()
+    expect(rs.value.stage).toBe(1)
+    expect(renderCount).toBe(2)
+
+    // 2. Click add
+    rs.value.stage++
+    expect(rs.value.stage).toBe(2)
+    expect(renderCount).toBe(3)
+
+    // 3. Click end
+    handleExit()
+    expect(rs.value.stage).toBe(0)
+    expect(renderCount).toBe(4)
+
+    handleBegin()
+    expect(rs.value.stage).toBe(1)
+    expect(renderCount).toBe(5)
+  })
+
+  it('should stop child scopes when cleanup stops a sibling scope', () => {
+    const parent = effectScope()
+    let sibling!: EffectScope
+    let last!: EffectScope
+
+    parent.run(() => {
+      effectScope().run(() => {
+        onScopeDispose(() => sibling.stop())
+      })
+      sibling = effectScope()
+      last = effectScope()
+    })
+
+    expect(() => parent.stop()).not.toThrow()
+    expect(sibling.active).toBe(false)
+    expect(last.active).toBe(false)
+  })
+
+  it('should resume effects when a watcher stops a sibling watcher', () => {
+    const count = ref(0)
+    const scope = effectScope()
+    let stopSecond = () => {}
+    const firstSpy = vi.fn(() => stopSecond())
+    const secondSpy = vi.fn()
+    const lastSpy = vi.fn()
+
+    scope.run(() => {
+      watch(count, firstSpy, { flush: 'sync' })
+      stopSecond = watch(count, secondSpy, { flush: 'sync' })
+      watch(count, lastSpy, { flush: 'sync' })
+    })
+
+    scope.pause()
+    count.value++
+
+    expect(() => scope.resume()).not.toThrow()
+    expect(firstSpy).toHaveBeenCalledTimes(1)
+    expect(secondSpy).not.toHaveBeenCalled()
+    expect(lastSpy).toHaveBeenCalledTimes(1)
+    expect(getEffectsCount(scope)).toBe(2)
+  })
+
+  it('should resume every effect when one stops itself as it resumes', () => {
+    const scope = effectScope()
+    const src = ref(0)
+    const seen: string[] = []
+
+    scope.run(() => {
+      const first = effect(() => {
+        seen.push(`first ${src.value}`)
+        if (src.value > 0) first.effect.stop()
+      })
+      effect(() => seen.push(`second ${src.value}`))
+    })
+
+    scope.pause()
+    src.value = 1
+    scope.resume()
+    expect(seen).toEqual(['first 0', 'second 0', 'first 1', 'second 1'])
+  })
+
+  it('should stop every effect of a scope when a cleanup stops its parent', () => {
+    const root = effectScope()
+    const parent = root.run(() => effectScope())!
+    const child = parent.run(() => effectScope())!
+    let last!: ReactiveEffectRunner
+    let nested!: ReactiveEffectRunner
+
+    child.run(() => {
+      effect(() => onEffectCleanup(() => parent.stop()))
+      last = effect(() => {})
+      effectScope().run(() => {
+        nested = effect(() => {})
+      })
+    })
+
+    child.stop()
+    expect(parent.active).toBe(false)
+    expect(last.effect.active).toBe(false)
+    expect(nested.effect.active).toBe(false)
+  })
+
+  it('should not keep a computed read in a stopped scope subscribed', () => {
+    const src = reactive({ foo: 1 })
+    const scope = effectScope()
+    const c = scope.run(() => computed(() => src.foo))!
+
+    scope.run(() => c.value)
+    expect(getDepFromReactive(toRaw(src), 'foo')).toBeDefined()
+
+    scope.stop()
+    src.foo = 2
+    expect(scope.run(() => c.value)).toBe(2)
+    expect(getDepFromReactive(toRaw(src), 'foo')).toBeUndefined()
+    expect((c as unknown as ComputedRefImpl).subs).toBeUndefined()
+    expect(scope.deps).toBeUndefined()
+
+    src.foo = 3
+    expect(scope.run(() => c.value)).toBe(3)
+    expect(getDepFromReactive(toRaw(src), 'foo')).toBeUndefined()
+    expect((c as unknown as ComputedRefImpl).subs).toBeUndefined()
+    expect(scope.deps).toBeUndefined()
+  })
+
+  it('should keep a computed read in a stopped scope subscribed while an effect uses it', () => {
+    const src = reactive({ foo: 1 })
+    const scope = effectScope()
+    const c = scope.run(() => computed(() => src.foo))!
+    let dummy
+    const runner = effect(() => (dummy = c.value))
+
+    scope.stop()
+    expect(scope.run(() => c.value)).toBe(1)
+    expect(scope.deps).toBeUndefined()
+    src.foo = 2
+    expect(dummy).toBe(2)
+
+    stop(runner)
+    expect(getDepFromReactive(toRaw(src), 'foo')).toBeUndefined()
+    expect((c as unknown as ComputedRefImpl).subs).toBeUndefined()
+  })
+
+  it('should preserve the cache of a computed without dependencies read in a stopped scope', () => {
+    const scope = effectScope()
+    const getter = vi.fn(() => ({}))
+    const c = computed(getter)
+    const value = scope.run(() => c.value)
+
+    scope.stop()
+    expect(scope.run(() => c.value)).toBe(value)
+    expect(scope.run(() => c.value)).toBe(value)
+    expect(getter).toHaveBeenCalledTimes(1)
+  })
+})
+
+function getEffectsCount(scope: EffectScope): number {
+  let n = 0
+  for (let dep = scope.deps; dep !== undefined; dep = dep.nextDep) {
+    if (dep.dep instanceof ReactiveEffect) {
+      n++
+    }
+  }
+  return n
+}

@@ -1,0 +1,3027 @@
+import {
+  type VaporComponentInstance,
+  child,
+  createComponent,
+  createDynamicComponent,
+  createFor,
+  createIf,
+  createKeyedFragment,
+  createSlot,
+  defineVaporComponent,
+  delegateEvents,
+  getDefaultValue,
+  getRestElement,
+  renderEffect,
+  setClass,
+  setInsertionState,
+  setStyle,
+  setText,
+  template,
+} from '../src'
+import {
+  type Ref,
+  nextTick,
+  onMounted,
+  onScopeDispose,
+  onUnmounted,
+  reactive,
+  readonly,
+  ref,
+  shallowRef,
+  toDisplayString,
+  triggerRef,
+} from '@vue/runtime-dom'
+import {
+  compile,
+  compileToVaporRender,
+  makeRender,
+  renderParity,
+  shuffle,
+} from './_utils'
+import { VaporVForFlags } from '@vue/shared'
+
+const define = makeRender()
+
+describe('createFor', () => {
+  test('should not register DOM item scopes on parent scope', () => {
+    const renderList = (list: Ref<number[]>) =>
+      define(() => {
+        return createFor(
+          () => list.value,
+          item => {
+            const span = document.createElement('span')
+            renderEffect(() => {
+              span.textContent = `${item.value}`
+            })
+            return span
+          },
+        )
+      }).render()
+
+    const empty = renderList(ref([]))
+    const emptyCount = getEffectsCount(empty.instance!.scope)
+    empty.app.unmount()
+    empty.host.innerHTML = ''
+
+    const filled = renderList(ref([1, 2, 3]))
+
+    expect(getEffectsCount(filled.instance!.scope)).toBe(emptyCount)
+  })
+
+  test('component item resources do not accumulate in the owner scope', async () => {
+    const state = ref({ items: [] as number[] })
+    const unmounted = vi.fn()
+    const Child = compile(
+      `<script setup vapor>
+      import { onUnmounted } from 'vue'
+      const props = defineProps(['index'])
+      onUnmounted(_components.unmounted)
+      </script>
+      <template><span>{{ props.index }}</span></template>`,
+      state,
+      { unmounted },
+    )
+    const App = compile(
+      `<template>
+        <components.Child
+          v-for="item in data.items"
+          :key="item"
+          :index="item"
+          ref="children"
+        />
+      </template>`,
+      state,
+      { Child },
+    )
+    const { app, instance } = define(App).render()
+    const cleanupBaseline = instance!.scope.cleanupsLength
+    const effectBaseline = getEffectsCount(instance!.scope)
+    const expectStableResources = () => {
+      expect(instance!.scope.cleanups).toHaveLength(cleanupBaseline)
+      expect(getEffectsCount(instance!.scope)).toBe(effectBaseline)
+      expect(instance!.refs.children).toHaveLength(state.value.items.length)
+    }
+
+    state.value.items = [0, 1, 2]
+    await nextTick()
+    expectStableResources()
+
+    state.value.items.splice(1, 1)
+    await nextTick()
+    expect(unmounted).toHaveBeenCalledOnce()
+    expectStableResources()
+
+    for (let id = 3; id < 6; id++) {
+      state.value.items = [state.value.items[1], id]
+      await nextTick()
+      expectStableResources()
+    }
+
+    expect(unmounted).toHaveBeenCalledTimes(4)
+
+    app.unmount()
+    await nextTick()
+
+    expect(unmounted).toHaveBeenCalledTimes(6)
+    expect(instance!.refs.children).toHaveLength(0)
+  })
+
+  test('stops dynamic component effects when an item is removed', async () => {
+    const mountedA = vi.fn()
+    const mountedB = vi.fn()
+    const A = defineVaporComponent({
+      setup() {
+        onMounted(mountedA)
+        return template('<span>A</span>')()
+      },
+    })
+    const B = defineVaporComponent({
+      setup() {
+        onMounted(mountedB)
+        return template('<span>B</span>')()
+      },
+    })
+    const state = shallowRef({ items: [] as number[], type: A })
+    const App = compile(
+      `<template>
+        <component
+          :is="data.type"
+          v-for="item in data.items"
+          :key="item"
+        />
+      </template>`,
+      state,
+    )
+    const { app, html, instance } = define(App).render()
+    const effectBaseline = getEffectsCount(instance!.scope)
+
+    state.value = { items: [0, 1, 2], type: A }
+    await nextTick()
+
+    expect(mountedA).toHaveBeenCalledTimes(3)
+    expect(getEffectsCount(instance!.scope)).toBe(effectBaseline)
+
+    state.value = { items: [0, 1, 2], type: B }
+    await nextTick()
+
+    expect(mountedB).toHaveBeenCalledTimes(3)
+
+    state.value = { items: [], type: B }
+    await nextTick()
+    state.value = { items: [], type: A }
+    await nextTick()
+
+    expect(html()).toBe('<!--for-->')
+    expect(mountedA).toHaveBeenCalledTimes(3)
+    expect(getEffectsCount(instance!.scope)).toBe(effectBaseline)
+    app.unmount()
+  })
+
+  test('does not retain prop source caches for native component fallbacks', async () => {
+    const state = ref({
+      items: [] as { id: number; value: string }[],
+    })
+    const Wrapper = compile(
+      `<template>
+        <section>
+          <component
+            :is="'div'"
+            v-for="item in data.items"
+            :key="item.id"
+            :data-id="item.value"
+          />
+        </section>
+      </template>`,
+      state,
+    )
+    const App = compile(`<template><components.Wrapper /></template>`, state, {
+      Wrapper,
+    })
+    const { app, host, instance } = define(App).render()
+    const wrapper = instance!.block as VaporComponentInstance
+    const cleanupBaseline = wrapper.scope.cleanupsLength
+    const effectBaseline = getEffectsCount(wrapper.scope)
+    const expectStableResources = () => {
+      expect(wrapper.scope.cleanups).toHaveLength(cleanupBaseline)
+      expect(getEffectsCount(wrapper.scope)).toBe(effectBaseline)
+    }
+
+    state.value.items = [{ id: 0, value: 'a' }]
+    await nextTick()
+
+    expect(host.querySelector('div')!.dataset.id).toBe('a')
+    expectStableResources()
+
+    state.value.items = [{ id: 0, value: 'b' }]
+    await nextTick()
+
+    expect(host.querySelector('div')!.dataset.id).toBe('b')
+
+    state.value.items = []
+    await nextTick()
+
+    expectStableResources()
+    app.unmount()
+  })
+
+  test('stops component v-show effects when an item is removed', async () => {
+    const state = ref({ items: [] as number[], visible: true })
+    const Child = compile(`<template><span>child</span></template>`, state)
+    const App = compile(
+      `<template>
+        <components.Child
+          v-for="item in data.items"
+          :key="item"
+          v-show="data.visible"
+        />
+      </template>`,
+      state,
+      { Child },
+    )
+    const { app, host, instance } = define(App).render()
+    const effectBaseline = getEffectsCount(instance!.scope)
+
+    state.value.items = [0, 1, 2]
+    await nextTick()
+    const removedNodes = [...host.querySelectorAll('span')]
+
+    expect(removedNodes).toHaveLength(3)
+    expect(getEffectsCount(instance!.scope)).toBe(effectBaseline)
+
+    state.value.items = []
+    await nextTick()
+    expect(removedNodes.every(node => !node.isConnected)).toBe(true)
+
+    state.value.visible = false
+    await nextTick()
+
+    expect(removedNodes.every(node => node.style.display === '')).toBe(true)
+    expect(getEffectsCount(instance!.scope)).toBe(effectBaseline)
+    app.unmount()
+  })
+
+  test('removes component items before stopping their scope', async () => {
+    const state = ref({ items: [] as number[] })
+    const cleanup = vi.fn(() => {
+      expect(host.querySelector('span')).toBeNull()
+    })
+    const refFn = (value: unknown) => {
+      if (!value) cleanup()
+    }
+    const Child = compile(`<template><span /></template>`, state)
+    const App = compile(
+      `<template>
+        <components.Child
+          v-for="item in data.items"
+          :key="item"
+          :ref="components.refFn"
+        />
+      </template>`,
+      state,
+      { Child, refFn },
+    )
+    const { app, instance, host } = define(App).render()
+    const effectBaseline = getEffectsCount(instance!.scope)
+
+    state.value.items = [0]
+    await nextTick()
+
+    expect(host.querySelector('span')).not.toBeNull()
+    expect(getEffectsCount(instance!.scope)).toBe(effectBaseline)
+
+    state.value.items = []
+    await nextTick()
+
+    expect(cleanup).toHaveBeenCalledOnce()
+    expect(getEffectsCount(instance!.scope)).toBe(effectBaseline)
+    app.unmount()
+  })
+
+  test('should stop DOM item scopes when parent scope is disposed', async () => {
+    const show = ref(true)
+    const list = ref([1, 2, 3])
+    const calls: string[] = []
+
+    const { host } = define(() => {
+      return createIf(
+        () => show.value,
+        () =>
+          createFor(
+            () => list.value,
+            item => {
+              const span = document.createElement('span')
+              renderEffect(() => {
+                calls.push(`render ${item.value}`)
+                span.textContent = `${item.value}`
+              })
+              return span
+            },
+          ),
+      )
+    }).render()
+
+    expect(calls).toEqual(['render 1', 'render 2', 'render 3'])
+
+    show.value = false
+    await nextTick()
+    expect(host.innerHTML).toBe('<!--if-->')
+    list.value[0] = 10
+    await nextTick()
+
+    expect(calls).toEqual(['render 1', 'render 2', 'render 3'])
+  })
+
+  test('should not re-run stale item effect when parent if turns false same tick', async () => {
+    const show = ref(true)
+    const list = ref([{ text: 'foo' }])
+    const calls: string[] = []
+
+    const { host } = define(() => {
+      return createIf(
+        () => show.value,
+        () =>
+          createFor(
+            () => list.value,
+            item => {
+              const span = document.createElement('span')
+              renderEffect(() => {
+                calls.push(item.value.text)
+                span.textContent = item.value.text
+              })
+              return span
+            },
+          ),
+      )
+    }).render()
+
+    expect(calls).toEqual(['foo'])
+
+    calls.length = 0
+    list.value[0].text = 'bar'
+    show.value = false
+    await nextTick()
+
+    expect(host.innerHTML).toBe('<!--if-->')
+    expect(calls).toEqual([])
+  })
+
+  test('should stop DOM item scopes when list is disposed by an outer v-for item', async () => {
+    const groups = ref([
+      { id: 1, items: [1, 2] },
+      { id: 2, items: [3] },
+    ])
+    const calls: string[] = []
+    const removed = groups.value[0]
+
+    define(() => {
+      return createFor(
+        () => groups.value,
+        group =>
+          createFor(
+            () => group.value.items,
+            item => {
+              const span = document.createElement('span')
+              renderEffect(() => {
+                calls.push(`render ${group.value.id}:${item.value}`)
+                span.textContent = `${item.value}`
+              })
+              return span
+            },
+          ),
+        group => group.id,
+      )
+    }).render()
+
+    expect(calls).toEqual(['render 1:1', 'render 1:2', 'render 2:3'])
+
+    groups.value.shift()
+    await nextTick()
+    removed.items[0] = 10
+    groups.value[0].items[0] = 30
+    await nextTick()
+
+    expect(calls).toEqual([
+      'render 1:1',
+      'render 1:2',
+      'render 2:3',
+      'render 2:30',
+    ])
+  })
+
+  test('should clear index ref when source switches from object to array', async () => {
+    const source = ref<any>({ x: 'A' })
+
+    const { host } = define(() => {
+      return createFor(
+        () => source.value,
+        (item, key, index) => {
+          const div = document.createElement('div')
+          renderEffect(() => {
+            div.textContent = `${item.value}-${key.value}-${String(index.value)}`
+          })
+          return div
+        },
+      )
+    }).render()
+
+    expect(host.innerHTML).toBe('<div>A-x-0</div><!--for-->')
+
+    source.value = ['B']
+    await nextTick()
+
+    expect(host.innerHTML).toBe('<div>B-0-undefined</div><!--for-->')
+  })
+
+  test('array source', async () => {
+    const list = ref([{ name: '1' }, { name: '2' }, { name: '3' }])
+    function reverse() {
+      list.value = list.value.reverse()
+    }
+
+    const { host } = define(() => {
+      const n1 = createFor(
+        () => list.value,
+        (item, key, index) => {
+          const span = document.createElement('li')
+          renderEffect(() => {
+            span.innerHTML = `${key.value}. ${item.value.name}`
+
+            // index should be undefined if source is not an object
+            expect(index.value).toBe(undefined)
+          })
+          return span
+        },
+        item => item.name,
+      )
+      return n1
+    }).render()
+
+    expect(host.innerHTML).toBe(
+      '<li>0. 1</li><li>1. 2</li><li>2. 3</li><!--for-->',
+    )
+
+    // add
+    list.value.push({ name: '4' })
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>0. 1</li><li>1. 2</li><li>2. 3</li><li>3. 4</li><!--for-->',
+    )
+
+    // move
+    reverse()
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>0. 4</li><li>1. 3</li><li>2. 2</li><li>3. 1</li><!--for-->',
+    )
+
+    reverse()
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>0. 1</li><li>1. 2</li><li>2. 3</li><li>3. 4</li><!--for-->',
+    )
+
+    // change
+    list.value[0].name = 'a'
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>0. a</li><li>1. 2</li><li>2. 3</li><li>3. 4</li><!--for-->',
+    )
+
+    // remove
+    list.value.splice(1, 1)
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>0. a</li><li>1. 3</li><li>2. 4</li><!--for-->',
+    )
+
+    // clear
+    list.value = []
+    await nextTick()
+    expect(host.innerHTML).toBe('<!--for-->')
+  })
+
+  test('number source', async () => {
+    const count = ref(3)
+
+    const { host } = define(() => {
+      const n1 = createFor(
+        () => count.value,
+        (item, key, index) => {
+          const span = document.createElement('li')
+          renderEffect(() => {
+            span.innerHTML = `${key.value}. ${item.value}`
+
+            // index should be undefined if source is not an object
+            expect(index.value).toBe(undefined)
+          })
+          return span
+        },
+        item => item,
+      )
+      return n1
+    }).render()
+
+    expect(host.innerHTML).toBe(
+      '<li>0. 1</li><li>1. 2</li><li>2. 3</li><!--for-->',
+    )
+
+    // add
+    count.value = 4
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>0. 1</li><li>1. 2</li><li>2. 3</li><li>3. 4</li><!--for-->',
+    )
+
+    // remove
+    count.value = 2
+    await nextTick()
+    expect(host.innerHTML).toBe('<li>0. 1</li><li>1. 2</li><!--for-->')
+
+    // clear
+    count.value = 0
+    await nextTick()
+    expect(host.innerHTML).toBe('<!--for-->')
+  })
+
+  test('non-integer number source warns and renders empty', () => {
+    const { host } = define(() => {
+      return createFor(
+        () => 3.1,
+        item => {
+          const span = document.createElement('li')
+          renderEffect(() => {
+            span.innerHTML = `${item.value}`
+          })
+          return span
+        },
+      )
+    }).render()
+
+    expect(host.innerHTML).toBe('<!--for-->')
+    expect(
+      `The v-for range expects a positive integer value but got 3.1.`,
+    ).toHaveBeenWarned()
+  })
+
+  test('negative number source warns and renders empty', () => {
+    const { host } = define(() => {
+      return createFor(
+        () => -1,
+        item => {
+          const span = document.createElement('li')
+          renderEffect(() => {
+            span.innerHTML = `${item.value}`
+          })
+          return span
+        },
+      )
+    }).render()
+
+    expect(host.innerHTML).toBe('<!--for-->')
+    expect(
+      `The v-for range expects a positive integer value but got -1.`,
+    ).toHaveBeenWarned()
+  })
+
+  test('object source', async () => {
+    const initial = () => ({ a: 1, b: 2, c: 3 })
+    const data = ref<Record<string, number>>(initial())
+
+    const { host } = define(() => {
+      const n1 = createFor(
+        () => data.value,
+        (item, key, index) => {
+          const span = document.createElement('li')
+          renderEffect(() => {
+            span.innerHTML = `${key.value}${index.value}. ${item.value}`
+            expect(index.value).not.toBe(undefined)
+          })
+          return span
+        },
+        item => {
+          return item
+        },
+      )
+      return n1
+    }).render()
+
+    expect(host.innerHTML).toBe(
+      '<li>a0. 1</li><li>b1. 2</li><li>c2. 3</li><!--for-->',
+    )
+
+    // move
+    data.value = {
+      c: 3,
+      b: 2,
+      a: 1,
+    }
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>c0. 3</li><li>b1. 2</li><li>a2. 1</li><!--for-->',
+    )
+
+    // add
+    data.value.d = 4
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>c0. 3</li><li>b1. 2</li><li>a2. 1</li><li>d3. 4</li><!--for-->',
+    )
+
+    // change
+    data.value.b = 100
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>c0. 3</li><li>b1. 100</li><li>a2. 1</li><li>d3. 4</li><!--for-->',
+    )
+
+    // remove
+    delete data.value.c
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>b0. 100</li><li>a1. 1</li><li>d2. 4</li><!--for-->',
+    )
+
+    // clear
+    data.value = {}
+    await nextTick()
+    expect(host.innerHTML).toBe('<!--for-->')
+  })
+
+  test('unkeyed object source updates key and index aliases', async () => {
+    const data = ref<Record<string, number>>({ a: 1 })
+
+    const { host } = define(() => {
+      return createFor(
+        () => data.value,
+        (item, key, index) => {
+          const span = document.createElement('li')
+          renderEffect(() => {
+            span.innerHTML = `${key.value}${index.value}. ${item.value}`
+          })
+          return span
+        },
+      )
+    }).render()
+
+    expect(host.innerHTML).toBe('<li>a0. 1</li><!--for-->')
+
+    data.value = { b: 2 }
+    await nextTick()
+
+    expect(host.innerHTML).toBe('<li>b0. 2</li><!--for-->')
+  })
+
+  test('keyed object source updates key and index aliases when reusing a block', async () => {
+    const data = ref<Record<string, number>>({ a: 1, c: 3 })
+
+    const { host } = define(() => {
+      return createFor(
+        () => data.value,
+        (item, key, index) => {
+          const span = document.createElement('li')
+          renderEffect(() => {
+            span.innerHTML = `${key.value}${index.value}. ${item.value}`
+          })
+          return span
+        },
+        item => item,
+      )
+    }).render()
+
+    expect(host.innerHTML).toBe('<li>a0. 1</li><li>c1. 3</li><!--for-->')
+
+    data.value = { b: 1, d: 4 }
+    await nextTick()
+
+    expect(host.innerHTML).toBe('<li>b0. 1</li><li>d1. 4</li><!--for-->')
+  })
+
+  test('de-structured value', async () => {
+    const list = ref([{ name: '1' }, { name: '2' }, { name: '3' }])
+    function reverse() {
+      list.value = list.value.reverse()
+    }
+
+    const { host } = define(() => {
+      const n1 = createFor(
+        () => list.value,
+        (item, key, index) => {
+          const span = document.createElement('li')
+          renderEffect(() => {
+            // compiler rewrites { name } destructure to inline access
+            span.innerHTML = `${key.value}. ${item.value.name}`
+            // index should be undefined if source is not an object
+            expect(index.value).toBe(undefined)
+          })
+          return span
+        },
+        item => item.name,
+      )
+      return n1
+    }).render()
+
+    expect(host.innerHTML).toBe(
+      '<li>0. 1</li><li>1. 2</li><li>2. 3</li><!--for-->',
+    )
+
+    // add
+    list.value.push({ name: '4' })
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>0. 1</li><li>1. 2</li><li>2. 3</li><li>3. 4</li><!--for-->',
+    )
+
+    // move
+    reverse()
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>0. 4</li><li>1. 3</li><li>2. 2</li><li>3. 1</li><!--for-->',
+    )
+
+    reverse()
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>0. 1</li><li>1. 2</li><li>2. 3</li><li>3. 4</li><!--for-->',
+    )
+
+    // change
+    list.value[0].name = 'a'
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>0. a</li><li>1. 2</li><li>2. 3</li><li>3. 4</li><!--for-->',
+    )
+
+    // remove
+    list.value.splice(1, 1)
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>0. a</li><li>1. 3</li><li>2. 4</li><!--for-->',
+    )
+
+    // clear
+    list.value = []
+    await nextTick()
+    expect(host.innerHTML).toBe('<!--for-->')
+  })
+
+  test('de-structured value (rest element)', async () => {
+    const list = ref([
+      { name: '1', a: 1 },
+      { name: '2', a: 2 },
+      { name: '3', a: 3 },
+    ])
+    function reverse() {
+      list.value = list.value.reverse()
+    }
+
+    const { host } = define(() => {
+      const n1 = createFor(
+        () => list.value,
+        (item, _key, index) => {
+          const span = document.createElement('li')
+          renderEffect(() => {
+            span.innerHTML = JSON.stringify(
+              getRestElement(item.value, ['name']),
+            )
+            // index should be undefined if source is not an object
+            expect(index.value).toBe(undefined)
+          })
+          return span
+        },
+        item => item.name,
+      )
+      return n1
+    }).render()
+
+    expect(host.innerHTML).toBe(
+      '<li>{"a":1}</li><li>{"a":2}</li><li>{"a":3}</li><!--for-->',
+    )
+
+    // add
+    list.value.push({ name: '4', a: 4 })
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>{"a":1}</li><li>{"a":2}</li><li>{"a":3}</li><li>{"a":4}</li><!--for-->',
+    )
+
+    // move
+    reverse()
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>{"a":4}</li><li>{"a":3}</li><li>{"a":2}</li><li>{"a":1}</li><!--for-->',
+    )
+
+    reverse()
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>{"a":1}</li><li>{"a":2}</li><li>{"a":3}</li><li>{"a":4}</li><!--for-->',
+    )
+
+    // change
+    list.value[0].a = 5
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>{"a":5}</li><li>{"a":2}</li><li>{"a":3}</li><li>{"a":4}</li><!--for-->',
+    )
+
+    // remove
+    list.value.splice(1, 1)
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>{"a":5}</li><li>{"a":3}</li><li>{"a":4}</li><!--for-->',
+    )
+
+    // clear
+    list.value = []
+    await nextTick()
+    expect(host.innerHTML).toBe('<!--for-->')
+  })
+
+  test('de-structured rest does not include inherited properties', () => {
+    const item = Object.create({ inherited: 'prototype' })
+    item.id = 1
+    item.name = 'own'
+    const data = ref({ items: [item] })
+    const { id, ...rest } = item
+    expect(id).toBe(1)
+    expect(rest).toEqual({ name: 'own' })
+    const App = compile(
+      `<template><div v-for="({ id, ...rest }) in data.items">{{ rest.inherited || 'none' }}:{{ rest.name }}</div></template>`,
+      data,
+    )
+
+    const { host } = define(App).render()
+
+    expect(host.textContent).toBe('none:own')
+  })
+
+  test('de-structured value (default value)', async () => {
+    const list = ref<any[]>([{ name: '1' }, { name: '2' }, { name: '3' }])
+    const getDefault = vi.fn(() => '0')
+
+    const { host } = define(() => {
+      const n1 = createFor(
+        () => list.value,
+        (item, _key, index) => {
+          const span = document.createElement('li')
+          renderEffect(() => {
+            span.innerHTML = getDefaultValue(item.value.x, getDefault)
+            // index should be undefined if source is not an object
+            expect(index.value).toBe(undefined)
+          })
+          return span
+        },
+        item => item.name,
+      )
+      return n1
+    }).render()
+
+    expect(host.innerHTML).toBe('<li>0</li><li>0</li><li>0</li><!--for-->')
+    expect(getDefault).toHaveBeenCalledTimes(3)
+
+    // change
+    list.value[0].x = 5
+    await nextTick()
+    expect(host.innerHTML).toBe('<li>5</li><li>0</li><li>0</li><!--for-->')
+    expect(getDefault).toHaveBeenCalledTimes(3)
+
+    // clear
+    list.value = []
+    await nextTick()
+    expect(host.innerHTML).toBe('<!--for-->')
+  })
+
+  test('shallowRef source', async () => {
+    const list = shallowRef([{ name: '1' }, { name: '2' }, { name: '3' }])
+    const setList = (update = list.value.slice()) => (list.value = update)
+    function reverse() {
+      list.value = list.value.reverse()
+    }
+
+    const { host } = define(() => {
+      const n1 = createFor(
+        () => list.value,
+        (item, key, index) => {
+          const span = document.createElement('li')
+          renderEffect(() => {
+            span.innerHTML = `${key.value}. ${item.value.name}`
+
+            // index should be undefined if source is not an object
+            expect(index.value).toBe(undefined)
+          })
+          return span
+        },
+      )
+      return n1
+    }).render()
+
+    expect(host.innerHTML).toBe(
+      '<li>0. 1</li><li>1. 2</li><li>2. 3</li><!--for-->',
+    )
+
+    // add
+    list.value.push({ name: '4' })
+    setList()
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>0. 1</li><li>1. 2</li><li>2. 3</li><li>3. 4</li><!--for-->',
+    )
+
+    // move
+    reverse()
+    setList()
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>0. 4</li><li>1. 3</li><li>2. 2</li><li>3. 1</li><!--for-->',
+    )
+
+    reverse()
+    setList()
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>0. 1</li><li>1. 2</li><li>2. 3</li><li>3. 4</li><!--for-->',
+    )
+
+    // change deep value should not update
+    list.value[0].name = 'a'
+    setList()
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>0. 1</li><li>1. 2</li><li>2. 3</li><li>3. 4</li><!--for-->',
+    )
+
+    // remove
+    list.value.splice(1, 1)
+    setList()
+    await nextTick()
+    expect(host.innerHTML).toBe(
+      '<li>0. 1</li><li>1. 3</li><li>2. 4</li><!--for-->',
+    )
+
+    // clear
+    setList([])
+    await nextTick()
+    expect(host.innerHTML).toBe('<!--for-->')
+  })
+
+  test('should optimize call frequency during list operations', async () => {
+    let sourceCalledTimes = 0
+    let renderCalledTimes = 0
+    let effectLabelCalledTimes = 0
+    let effectIndexCalledTimes = 0
+
+    const resetCounter = () => {
+      sourceCalledTimes = 0
+      renderCalledTimes = 0
+      effectLabelCalledTimes = 0
+      effectIndexCalledTimes = 0
+    }
+    const expectCalledTimesToBe = (
+      message: string,
+      source: number,
+      render: number,
+      label: number,
+      index: number,
+    ) => {
+      expect(
+        {
+          source: sourceCalledTimes,
+          render: renderCalledTimes,
+          label: effectLabelCalledTimes,
+          index: effectIndexCalledTimes,
+        },
+        message,
+      ).toEqual({ source, render, label, index })
+      resetCounter()
+    }
+
+    const createItem = (
+      (id = 0) =>
+      (label = id) => ({ id: id++, label })
+    )()
+    const createItems = (length: number) =>
+      Array.from({ length }, (_, i) => createItem(i))
+    const list = ref(createItems(100))
+    const length = () => list.value.length
+
+    define(() => {
+      const n1 = createFor(
+        () => (++sourceCalledTimes, list.value),
+        (item, index) => {
+          ++renderCalledTimes
+          const span = document.createElement('li')
+          renderEffect(() => {
+            ++effectLabelCalledTimes
+            item.value.label
+          })
+          renderEffect(() => {
+            ++effectIndexCalledTimes
+            index.value
+          })
+          return span
+        },
+        item => item.id,
+      )
+      return n1
+    }).render()
+
+    // Create rows
+    expectCalledTimesToBe('Create rows', 1, length(), length(), length())
+
+    // Update every 10th row
+    for (let i = 0; i < length(); i += 10) {
+      list.value[i].label += 10000
+    }
+    await nextTick()
+    expectCalledTimesToBe('Update every 10th row', 0, 0, length() / 10, 0)
+
+    // Append rows
+    list.value.push(...createItems(100))
+    await nextTick()
+    expectCalledTimesToBe('Append rows', 1, 100, 100, 100)
+
+    // Inserts rows at the beginning
+    const tempLen = length()
+    list.value.unshift(...createItems(100))
+    await nextTick()
+    expectCalledTimesToBe(
+      'Inserts rows at the beginning',
+      1,
+      100,
+      100,
+      100 + tempLen,
+    )
+
+    // Inserts rows in the middle
+    const middleIdx = length() / 2
+    list.value.splice(middleIdx, 0, ...createItems(100))
+    await nextTick()
+    expectCalledTimesToBe(
+      'Inserts rows in the middle',
+      1,
+      100,
+      100,
+      100 + middleIdx,
+    )
+
+    // Swap rows
+    const temp = list.value[1]
+    list.value[1] = list.value[length() - 2]
+    list.value[length() - 2] = temp
+    await nextTick()
+    expectCalledTimesToBe('Swap rows', 1, 0, 0, 2)
+
+    // Remove rows
+    list.value.splice(1, 1)
+    list.value.splice(length() - 2, 1)
+    await nextTick()
+    expectCalledTimesToBe('Remove rows', 1, 0, 0, length() - 1)
+
+    // Clear rows
+    list.value = []
+    await nextTick()
+    expectCalledTimesToBe('Clear rows', 1, 0, 0, 0)
+  })
+
+  test('should optimize call frequency during list operations with shallowRef', async () => {
+    let sourceCalledTimes = 0
+    let renderCalledTimes = 0
+    let effectLabelCalledTimes = 0
+    let effectIndexCalledTimes = 0
+
+    const resetCounter = () => {
+      sourceCalledTimes = 0
+      renderCalledTimes = 0
+      effectLabelCalledTimes = 0
+      effectIndexCalledTimes = 0
+    }
+    const expectCalledTimesToBe = (
+      message: string,
+      source: number,
+      render: number,
+      label: number,
+      index: number,
+    ) => {
+      expect(
+        {
+          source: sourceCalledTimes,
+          render: renderCalledTimes,
+          label: effectLabelCalledTimes,
+          index: effectIndexCalledTimes,
+        },
+        message,
+      ).toEqual({ source, render, label, index })
+      resetCounter()
+    }
+
+    const createItem = (
+      (id = 0) =>
+      (label = id) => ({ id: id++, label: shallowRef(label) })
+    )()
+    const createItems = (length: number) =>
+      Array.from({ length }, (_, i) => createItem(i))
+    const list = shallowRef(createItems(100))
+    const length = () => list.value.length
+
+    define(() => {
+      const n1 = createFor(
+        () => (++sourceCalledTimes, list.value),
+        (item, index) => {
+          ++renderCalledTimes
+          const span = document.createElement('li')
+          renderEffect(() => {
+            ++effectLabelCalledTimes
+            item.value.label.value
+          })
+          renderEffect(() => {
+            ++effectIndexCalledTimes
+            index.value
+          })
+          return span
+        },
+        item => item.id,
+      )
+      return n1
+    }).render()
+
+    // Create rows
+    expectCalledTimesToBe('Create rows', 1, length(), length(), length())
+
+    // Update every 10th row
+    for (let i = 0; i < length(); i += 10) {
+      list.value[i].label.value += 10000
+    }
+    await nextTick()
+    expectCalledTimesToBe('Update every 10th row', 0, 0, length() / 10, 0)
+
+    // Append rows
+    list.value.push(...createItems(100))
+    triggerRef(list)
+    await nextTick()
+    expectCalledTimesToBe('Append rows', 1, 100, 100, 100)
+
+    // Inserts rows at the beginning
+    const tempLen = length()
+    list.value.unshift(...createItems(100))
+    triggerRef(list)
+    await nextTick()
+    expectCalledTimesToBe(
+      'Inserts rows at the beginning',
+      1,
+      100,
+      100,
+      100 + tempLen,
+    )
+
+    // Inserts rows in the middle
+    const middleIdx = length() / 2
+    list.value.splice(middleIdx, 0, ...createItems(100))
+    triggerRef(list)
+    await nextTick()
+    expectCalledTimesToBe(
+      'Inserts rows in the middle',
+      1,
+      100,
+      100,
+      100 + middleIdx,
+    )
+
+    // Swap rows
+    const temp = list.value[1]
+    list.value[1] = list.value[length() - 2]
+    list.value[length() - 2] = temp
+    triggerRef(list)
+    await nextTick()
+    expectCalledTimesToBe('Swap rows', 1, 0, 0, 2)
+
+    // Remove rows
+    list.value.splice(1, 1)
+    list.value.splice(length() - 2, 1)
+    triggerRef(list)
+    await nextTick()
+    expectCalledTimesToBe('Remove rows', 1, 0, 0, length() - 1)
+
+    // Clear rows
+    list.value = []
+    await nextTick()
+    expectCalledTimesToBe('Clear rows', 1, 0, 0, 0)
+  })
+
+  test('should work with null and undefined', async () => {
+    const list = ref<{ name: string }[] | null | undefined>(undefined)
+
+    const { host } = define(() => {
+      const n1 = createFor(
+        () => list.value as any,
+        (item, key, index) => {
+          const span = document.createElement('li')
+          renderEffect(() => {
+            span.innerHTML = `${key.value}. ${item.value.name}`
+
+            // index should be undefined if source is not an object
+            expect(index.value).toBe(undefined)
+          })
+          return span
+        },
+        item => item.name,
+      )
+      return n1
+    }).render()
+
+    expect(host.innerHTML).toBe('<!--for-->')
+
+    // set to valid array
+    list.value = [{ name: '1' }]
+    await nextTick()
+    expect(host.innerHTML).toBe('<li>0. 1</li><!--for-->')
+
+    // null
+    list.value = null
+    await nextTick()
+    expect(host.innerHTML).toBe('<!--for-->')
+  })
+
+  test('should track key dependencies for keyed diff', async () => {
+    const list = ref([{ id: 1, opened: false }])
+    const calls: string[] = []
+
+    const { host } = define(() => {
+      return createFor(
+        () => list.value,
+        item => {
+          const label = `${item.value.id}-${item.value.opened}`
+          calls.push(`mount ${label}`)
+          onScopeDispose(() => calls.push(`unmount ${label}`))
+
+          const span = document.createElement('span')
+          span.textContent = label
+          return span
+        },
+        item => `${item.id}-${item.opened}`,
+      )
+    }).render()
+
+    expect(host.innerHTML).toBe('<span>1-false</span><!--for-->')
+    expect(calls).toEqual(['mount 1-false'])
+
+    list.value[0].opened = true
+    await nextTick()
+
+    expect(host.innerHTML).toBe('<span>1-true</span><!--for-->')
+    expect(calls).toEqual(['mount 1-false', 'unmount 1-false', 'mount 1-true'])
+  })
+
+  test('class comparing an expression of the key updates like vdom', async () => {
+    const active: string[] = []
+    await renderParity(
+      {
+        App: `<template><li v-for="(p, i) in data.pages" :key="i" :class="{ active: i + 1 === data.page }">{{ p }}</li></template>`,
+      },
+      () => ref({ pages: ['a', 'b', 'c', 'd'], page: 1 }),
+      async (data, root) => {
+        for (const page of [2, 3]) {
+          data.value.page = page
+          await nextTick()
+          const rows = root.querySelectorAll('.active')
+          active.push([...rows].map(row => row.textContent).join())
+        }
+      },
+    )
+    // vdom, then vapor
+    expect(active).toEqual(['b', 'c', 'b', 'c'])
+  })
+
+  test('inserts items before a following item that renders an empty branch', async () => {
+    const branches = `<p v-if="it.k === 1">p{{ it.id }}</p><b v-else-if="it.k === 2">b{{ it.id }}</b>`
+    const act = async (data: Ref<any>) => {
+      data.value.list.unshift({ id: 2, k: 0 })
+      await nextTick()
+      data.value.list.unshift({ id: 3, k: 1 })
+      await nextTick()
+      data.value.list[1].k = 2
+    }
+    const makeData = () => ref({ list: [{ id: 1, k: 1 }] })
+
+    const { vdom, vapor } = await renderParity(
+      {
+        App: `<template><div><template v-for="it in data.list" :key="it.id">${branches}</template></div></template>`,
+      },
+      makeData,
+      act,
+    )
+    expect(vdom.text).toBe('p3b2p1')
+    expect(vapor.text).toBe(vdom.text)
+
+    const components = await renderParity(
+      {
+        Row: `<script setup>defineProps(['it'])</script><template>${branches}</template>`,
+        App: `<template><div><components.Row v-for="it in data.list" :key="it.id" :it="it" /></div></template>`,
+      },
+      makeData,
+      act,
+    )
+    expect(components.vdom.text).toBe('p3b2p1')
+    expect(components.vapor.text).toBe(components.vdom.text)
+  })
+
+  test('inserts items before a following slot item with an empty fallback', async () => {
+    const { vdom, vapor } = await renderParity(
+      {
+        Child: `<template><div><template v-for="it in data.list" :key="it.id"><slot :it="it"><i v-if="it.fb">f{{ it.id }}</i></slot></template></div></template>`,
+        App: `<template><components.Child><template #default="{ it }"><b v-if="it.c">c{{ it.id }}</b></template></components.Child></template>`,
+      },
+      () => ref({ list: [{ id: 1, c: true, fb: false }] }),
+      async data => {
+        data.value.list[0].c = false
+        await nextTick()
+        data.value.list.unshift({ id: 2, c: true, fb: false })
+        await nextTick()
+        data.value.list[1].c = true
+      },
+    )
+    expect(vdom.text).toBe('c2c1')
+    expect(vapor.text).toBe(vdom.text)
+  })
+
+  // A type annotation or a default value is part of the alias source, so the
+  // bound name has to be read off the ast - see `parseValueDestructure`.
+  // Note `renderParity` does not run the TS strip stage a real build does: it
+  // injects a plain `<script setup>` and runs the output through `new Function`.
+  // These cases only work there because the fix leaves no TS in the output; a
+  // destructured alias keeps its annotation (vdom parity) and would throw a
+  // `SyntaxError` here, so it is covered by a codegen test instead.
+  test('type-annotated aliases resolve like vdom', async () => {
+    const { vdom, vapor } = await renderParity(
+      {
+        App: `<template><li v-for="(item: string, index: number) in data.list" :class="{ last: index === data.list.length - 1 }">{{ item }}{{ index }}</li></template>`,
+      },
+      () => ref({ list: ['a', 'b'] }),
+      async data => {
+        data.value.list.push('c')
+        await nextTick()
+      },
+    )
+    expect(vdom.text).toBe('a0b1c2')
+    expect(vapor.text).toBe(vdom.text)
+    expect(vapor.after).toContain('class="last"')
+  })
+
+  test('type-annotated key and index aliases resolve like vdom', async () => {
+    const { vdom, vapor } = await renderParity(
+      {
+        App: `<template><li v-for="(value: string, key: string, index: number) in data.obj">{{ value }}{{ key }}{{ index }}</li></template>`,
+      },
+      () => ref({ obj: { x: 'X', y: 'Y' } as Record<string, string> }),
+      async data => {
+        data.value.obj = { x: 'X', y: 'Y', z: 'Z' }
+        await nextTick()
+      },
+    )
+    expect(vdom.text).toBe('Xx0Yy1Zz2')
+    expect(vapor.text).toBe(vdom.text)
+  })
+
+  test('type-annotated aliases resolve inside an event handler', async () => {
+    delegateEvents('click')
+    const { vdom, vapor } = await renderParity(
+      {
+        App: `<template><div><li v-for="(item: string, index: number) in data.list" :id="'r' + index" @click="data.clicked = index">{{ item }}</li><p>{{ data.clicked }}</p></div></template>`,
+      },
+      () => ref({ list: ['a', 'b'], clicked: -1 }),
+      async (_data, root) => {
+        ;(root.querySelector('#r1') as HTMLElement).click()
+        await nextTick()
+      },
+    )
+    expect(vdom.text).toBe('ab1')
+    expect(vapor.text).toBe('ab1')
+  })
+
+  // the same alias source trips vapor up without any typescript involved
+  test('a default value on a key alias resolves like vdom', async () => {
+    const { vdom, vapor } = await renderParity(
+      {
+        App: `<template><li v-for="(value, key = 'none') in data.obj">{{ value }}{{ key }}</li></template>`,
+      },
+      () => ref({ obj: { x: 'X' } as Record<string, string> }),
+      async data => {
+        data.value.obj = { x: 'X', y: 'Y' }
+        await nextTick()
+      },
+    )
+    expect(vdom.text).toBe('XxYy')
+    expect(vapor.text).toBe(vdom.text)
+  })
+
+  test('a default value on an index alias is applied like vdom', async () => {
+    const { vdom, vapor } = await renderParity(
+      {
+        App: `<template><li v-for="(item, key, index = 99) in data.list">{{ item }}|{{ key }}|{{ index }}</li></template>`,
+      },
+      () => ref({ list: ['a', 'b'] }),
+      async data => {
+        data.value.list.push('c')
+        await nextTick()
+      },
+    )
+    // an array source calls the render fn without an index, so the default wins
+    expect(vdom.text).toBe('a|0|99b|1|99c|2|99')
+    expect(vapor.text).toBe(vdom.text)
+  })
+
+  test('type-annotated aliases resolve in a nested template v-for', async () => {
+    const { vdom, vapor } = await renderParity(
+      {
+        App: `<template><template v-for="(row: string[], r: number) in data.rows"><i v-for="(cell: string, c: number) in row">{{ cell }}{{ r }}{{ c }}</i></template></template>`,
+      },
+      () => ref({ rows: [['p'], ['q']] }),
+      async data => {
+        data.value.rows.push(['s'])
+        await nextTick()
+      },
+    )
+    expect(vdom.text).toBe('p00q10s20')
+    expect(vapor.text).toBe(vdom.text)
+  })
+
+  test('type-annotated aliases resolve in a dynamic slot name', async () => {
+    const { vdom, vapor } = await renderParity(
+      {
+        Child: `<template><div><slot name="a" /><slot name="b" /></div></template>`,
+        App: `<template><components.Child><template v-for="(item: string, index: number) in data.list" #[item]>{{ item }}{{ index }}</template></components.Child></template>`,
+      },
+      () => ref({ list: ['a', 'b'] }),
+      async () => {},
+    )
+    expect(vdom.text).toBe('a0b1')
+    expect(vapor.text).toBe(vdom.text)
+  })
+
+  test('a dynamic argument named key binds like vdom', async () => {
+    const rows: string[] = []
+    await renderParity(
+      {
+        App: `<template><i v-for="(value, key) in data.attrs" :key="key" :[key]="value" /></template>`,
+      },
+      () => ref({ attrs: { title: 'a', id: 'b' } as Record<string, string> }),
+      async (data, root) => {
+        data.value.attrs.title = 'c'
+        await nextTick()
+        rows.push([...root.querySelectorAll('i')].map(i => i.outerHTML).join())
+      },
+    )
+    // vdom, then vapor
+    expect(rows).toEqual([
+      '<i title="c"></i>,<i id="b"></i>',
+      '<i title="c"></i>,<i id="b"></i>',
+    ])
+  })
+
+  describe('readonly source', () => {
+    test('should not allow mutation', () => {
+      const arr = readonly(reactive([{ foo: 1 }]))
+
+      const { host } = define(() => {
+        const n1 = createFor(
+          () => arr,
+          (item, key, index) => {
+            const span = document.createElement('li')
+            renderEffect(() => {
+              item.value.foo = 0
+              span.innerHTML = `${item.value.foo}`
+            })
+            return span
+          },
+          idx => idx,
+        )
+        return n1
+      }).render()
+
+      expect(host.innerHTML).toBe('<li>1</li><!--for-->')
+      expect(
+        `Set operation on key "foo" failed: target is readonly.`,
+      ).toHaveBeenWarned()
+    })
+
+    test('should trigger effect for deep mutations', async () => {
+      const arr = reactive([{ foo: 1 }])
+      const readonlyArr = readonly(arr)
+
+      const { host } = define(() => {
+        const n1 = createFor(
+          () => readonlyArr,
+          (item, key, index) => {
+            const span = document.createElement('li')
+            renderEffect(() => {
+              span.innerHTML = `${item.value.foo}`
+            })
+            return span
+          },
+          idx => idx,
+        )
+        return n1
+      }).render()
+
+      expect(host.innerHTML).toBe('<li>1</li><!--for-->')
+
+      arr[0].foo = 2
+      await nextTick()
+      expect(host.innerHTML).toBe('<li>2</li><!--for-->')
+    })
+  })
+
+  // ported from packages/runtime-core/__tests__/rendererChildren.spec.ts
+  describe('renderer: keyed children', () => {
+    const render = (arr: Ref<number[]>) => {
+      return define({
+        setup() {
+          const n0 = createFor(
+            () => arr.value,
+            _for_item0 => {
+              const n2 = template('<span> </span>', 1)() as any
+              const x2 = child(n2) as any
+              renderEffect(() => setText(x2, toDisplayString(_for_item0.value)))
+              return n2
+            },
+            item => item,
+          )
+          return n0
+        },
+      }).render()
+    }
+
+    test('append', async () => {
+      const arr = ref<number[]>([1])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(1)
+      expect(html()).toBe('<span>1</span><!--for-->')
+
+      arr.value = [1, 2, 3]
+      await nextTick()
+      expect(host.children.length).toBe(3)
+      expect(html()).toBe(
+        '<span>1</span><span>2</span><span>3</span><!--for-->',
+      )
+    })
+
+    test('prepend', async () => {
+      const arr = ref<number[]>([4, 5])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(2)
+      expect(html()).toBe('<span>4</span><span>5</span><!--for-->')
+
+      arr.value = [1, 2, 3, 4, 5]
+      await nextTick()
+      expect(host.children.length).toBe(5)
+      expect(html()).toBe(
+        `<span>1</span>` +
+          `<span>2</span>` +
+          `<span>3</span>` +
+          `<span>4</span>` +
+          `<span>5</span>` +
+          `<!--for-->`,
+      )
+    })
+
+    test('insert in middle', async () => {
+      const arr = ref<number[]>([1, 2, 4, 5])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(4)
+      expect(html()).toBe(
+        '<span>1</span><span>2</span><span>4</span><span>5</span><!--for-->',
+      )
+
+      arr.value = [1, 2, 3, 4, 5]
+      await nextTick()
+      expect(host.children.length).toBe(5)
+      expect(html()).toBe(
+        `<span>1</span>` +
+          `<span>2</span>` +
+          `<span>3</span>` +
+          `<span>4</span>` +
+          `<span>5</span>` +
+          `<!--for-->`,
+      )
+    })
+
+    test('insert at beginning and end', async () => {
+      const arr = ref<number[]>([2, 3, 4])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(3)
+      expect(html()).toBe(
+        `<span>2</span><span>3</span><span>4</span><!--for-->`,
+      )
+
+      arr.value = [1, 2, 3, 4, 5]
+      await nextTick()
+      expect(host.children.length).toBe(5)
+      expect(html()).toBe(
+        `<span>1</span>` +
+          `<span>2</span>` +
+          `<span>3</span>` +
+          `<span>4</span>` +
+          `<span>5</span>` +
+          `<!--for-->`,
+      )
+    })
+
+    test('insert to empty parent', async () => {
+      const arr = ref<number[]>([])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(0)
+      expect(html()).toBe('<!--for-->')
+
+      arr.value = [1, 2, 3, 4, 5]
+      await nextTick()
+      expect(host.children.length).toBe(5)
+      expect(html()).toBe(
+        `<span>1</span>` +
+          `<span>2</span>` +
+          `<span>3</span>` +
+          `<span>4</span>` +
+          `<span>5</span>` +
+          `<!--for-->`,
+      )
+    })
+
+    test('remove all children from parent', async () => {
+      const arr = ref<number[]>([1, 2, 3, 4, 5])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(5)
+      expect(html()).toBe(
+        `<span>1</span>` +
+          `<span>2</span>` +
+          `<span>3</span>` +
+          `<span>4</span>` +
+          `<span>5</span>` +
+          `<!--for-->`,
+      )
+
+      arr.value = []
+      await nextTick()
+      expect(host.children.length).toBe(0)
+      expect(html()).toBe('<!--for-->')
+    })
+
+    test('remove from beginning', async () => {
+      const arr = ref<number[]>([1, 2, 3, 4, 5])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(5)
+      expect(html()).toBe(
+        `<span>1</span>` +
+          `<span>2</span>` +
+          `<span>3</span>` +
+          `<span>4</span>` +
+          `<span>5</span>` +
+          `<!--for-->`,
+      )
+
+      arr.value = [3, 4, 5]
+      await nextTick()
+      expect(host.children.length).toBe(3)
+      expect(html()).toBe(
+        `<span>3</span><span>4</span><span>5</span><!--for-->`,
+      )
+    })
+
+    test('remove from end', async () => {
+      const arr = ref<number[]>([1, 2, 3, 4, 5])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(5)
+      expect(html()).toBe(
+        `<span>1</span>` +
+          `<span>2</span>` +
+          `<span>3</span>` +
+          `<span>4</span>` +
+          `<span>5</span>` +
+          `<!--for-->`,
+      )
+
+      arr.value = [1, 2, 3]
+      await nextTick()
+      expect(host.children.length).toBe(3)
+      expect(html()).toBe(
+        `<span>1</span><span>2</span><span>3</span><!--for-->`,
+      )
+    })
+
+    test('remove from middle', async () => {
+      const arr = ref<number[]>([1, 2, 3, 4, 5])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(5)
+      expect(html()).toBe(
+        `<span>1</span>` +
+          `<span>2</span>` +
+          `<span>3</span>` +
+          `<span>4</span>` +
+          `<span>5</span>` +
+          `<!--for-->`,
+      )
+
+      arr.value = [1, 2, 4, 5]
+      await nextTick()
+      expect(host.children.length).toBe(4)
+      expect(html()).toBe(
+        `<span>1</span><span>2</span><span>4</span><span>5</span><!--for-->`,
+      )
+    })
+
+    test('remove from beginning and insert at end', async () => {
+      const arr = ref<number[]>([1, 2, 3])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(3)
+      expect(html()).toBe(
+        `<span>1</span><span>2</span><span>3</span><!--for-->`,
+      )
+
+      arr.value = [2, 3, 4]
+      await nextTick()
+      expect(host.children.length).toBe(3)
+      expect(html()).toBe(
+        `<span>2</span><span>3</span><span>4</span><!--for-->`,
+      )
+    })
+
+    test('moving single child forward', async () => {
+      const arr = ref<number[]>([1, 2, 3, 4])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(4)
+      expect(html()).toBe(
+        `<span>1</span>` +
+          `<span>2</span>` +
+          `<span>3</span>` +
+          `<span>4</span>` +
+          `<!--for-->`,
+      )
+
+      arr.value = [2, 3, 1, 4]
+      await nextTick()
+      expect(host.children.length).toBe(4)
+      expect(html()).toBe(
+        `<span>2</span><span>3</span><span>1</span><span>4</span><!--for-->`,
+      )
+    })
+
+    test('moving single child backwards', async () => {
+      const arr = ref<number[]>([1, 2, 3, 4])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(4)
+      expect(html()).toBe(
+        `<span>1</span>` +
+          `<span>2</span>` +
+          `<span>3</span>` +
+          `<span>4</span>` +
+          `<!--for-->`,
+      )
+
+      arr.value = [1, 4, 2, 3]
+      await nextTick()
+      expect(host.children.length).toBe(4)
+      expect(html()).toBe(
+        `<span>1</span><span>4</span><span>2</span><span>3</span><!--for-->`,
+      )
+    })
+
+    test('moving single child to end', async () => {
+      const arr = ref<number[]>([1, 2, 3])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(3)
+      expect(html()).toBe(
+        `<span>1</span><span>2</span><span>3</span><!--for-->`,
+      )
+
+      arr.value = [2, 3, 1]
+      await nextTick()
+      expect(host.children.length).toBe(3)
+      expect(html()).toBe(
+        `<span>2</span><span>3</span><span>1</span><!--for-->`,
+      )
+    })
+
+    test('swap first and last', async () => {
+      const arr = ref<number[]>([1, 2, 3, 4])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(4)
+      expect(html()).toBe(
+        `<span>1</span><span>2</span><span>3</span><span>4</span><!--for-->`,
+      )
+
+      arr.value = [4, 2, 3, 1]
+      await nextTick()
+      expect(host.children.length).toBe(4)
+      expect(html()).toBe(
+        `<span>4</span><span>2</span><span>3</span><span>1</span><!--for-->`,
+      )
+    })
+
+    test('move to left & replace', async () => {
+      const arr = ref<number[]>([1, 2, 3, 4, 5])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(5)
+      expect(html()).toBe(
+        `<span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><!--for-->`,
+      )
+
+      arr.value = [4, 1, 2, 3, 6]
+      await nextTick()
+      expect(host.children.length).toBe(5)
+      expect(html()).toBe(
+        `<span>4</span><span>1</span><span>2</span><span>3</span><span>6</span><!--for-->`,
+      )
+    })
+
+    test('move to left and leaves hold', async () => {
+      const arr = ref<number[]>([1, 4, 5])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(3)
+      expect(html()).toBe(
+        `<span>1</span><span>4</span><span>5</span><!--for-->`,
+      )
+
+      arr.value = [4, 6]
+      await nextTick()
+      expect(host.children.length).toBe(2)
+      expect(html()).toBe(`<span>4</span><span>6</span><!--for-->`)
+    })
+
+    test('moved and set to undefined element ending at the end', async () => {
+      const arr = ref<number[]>([2, 4, 5])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(3)
+      expect(html()).toBe(
+        `<span>2</span><span>4</span><span>5</span><!--for-->`,
+      )
+
+      arr.value = [4, 5, 3]
+      await nextTick()
+      expect(host.children.length).toBe(3)
+      expect(html()).toBe(
+        `<span>4</span><span>5</span><span>3</span><!--for-->`,
+      )
+    })
+
+    test('reverse element', async () => {
+      const arr = ref<number[]>([1, 2, 3, 4, 5, 6, 7, 8])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(8)
+      expect(html()).toBe(
+        `<span>1</span><span>2</span><span>3</span><span>4</span>` +
+          `<span>5</span><span>6</span><span>7</span><span>8</span><!--for-->`,
+      )
+
+      arr.value = [8, 7, 6, 5, 4, 3, 2, 1]
+      await nextTick()
+      expect(host.children.length).toBe(8)
+      expect(html()).toBe(
+        `<span>8</span><span>7</span><span>6</span><span>5</span>` +
+          `<span>4</span><span>3</span><span>2</span><span>1</span><!--for-->`,
+      )
+    })
+
+    test('something', async () => {
+      const arr = ref<number[]>([0, 1, 2, 3, 4, 5])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(6)
+      expect(html()).toBe(
+        `<span>0</span><span>1</span><span>2</span><span>3</span><span>4</span>` +
+          `<span>5</span><!--for-->`,
+      )
+
+      arr.value = [4, 3, 2, 1, 5, 0]
+      await nextTick()
+      expect(host.children.length).toBe(6)
+      expect(html()).toBe(
+        `<span>4</span><span>3</span><span>2</span><span>1</span>` +
+          `<span>5</span><span>0</span><!--for-->`,
+      )
+    })
+
+    test('random shuffle', async () => {
+      const elms = 14
+      const samples = 5
+
+      for (let n = 0; n < samples; ++n) {
+        const arr = ref([...Array(elms).keys()])
+        const opacities = ref<string[]>([])
+
+        const host = document.createElement('div')
+        define({
+          setup() {
+            const n3 = template('<span></span>')() as any
+            setInsertionState(n3)
+            createFor(
+              () => arr.value,
+              _for_item0 => {
+                const n2 = template('<span> </span>')() as any
+                const x2 = child(n2) as any
+                renderEffect(() => {
+                  const _opacities = opacities.value
+                  const _item = _for_item0.value
+                  const _opacities_item = _opacities[_item] || '1'
+                  setStyle(n2, { opacity: _opacities_item })
+                  setText(x2, toDisplayString(_item))
+                })
+                return n2
+              },
+              item => item,
+              1,
+            )
+            return n3
+          },
+        }).render(undefined, host)
+
+        let rootChild = host.children[0]
+        for (let i = 0; i < elms; ++i) {
+          const child = rootChild.children[i] as HTMLSpanElement
+          expect(child.innerHTML).toBe(i.toString())
+          expect(child.style.opacity).toBe('1')
+          opacities.value[i] = Math.random().toFixed(5).toString()
+        }
+
+        await nextTick()
+        for (let i = 0; i < elms; ++i) {
+          const child = rootChild.children[i] as any
+          expect(child.$sty.opacity).toBe(opacities.value[i])
+        }
+
+        arr.value = shuffle(arr.value.slice(0))
+        await nextTick()
+
+        for (let i = 0; i < elms; ++i) {
+          const child = rootChild.children[i] as any
+          expect(child.innerHTML).toBe(arr.value[i].toString())
+          expect(child.$sty.opacity).toBe(opacities.value[arr.value[i]])
+        }
+      }
+    })
+
+    test('children with the same key but with different tag', async () => {
+      const items = ref([
+        { key: 1, tag: 'div', text: 'one' },
+        { key: 2, tag: 'div', text: 'two' },
+        { key: 3, tag: 'div', text: 'three' },
+        { key: 4, tag: 'div', text: 'four' },
+      ])
+
+      const { host } = define(() => {
+        return createFor(
+          () => items.value,
+          _for_item0 => {
+            const n2 = createIf(
+              () => _for_item0.value.tag === 'div',
+              () => {
+                const n4 = template('<div> </div>')() as any
+                const x4 = child(n4) as any
+                renderEffect(() =>
+                  setText(x4, toDisplayString(_for_item0.value.text)),
+                )
+                return n4
+              },
+              () => {
+                const n6 = template('<span> </span>', 1)() as any
+                const x6 = child(n6) as any
+                renderEffect(() =>
+                  setText(x6, toDisplayString(_for_item0.value.text)),
+                )
+                return n6
+              },
+            )
+            return n2
+          },
+          item => item.key,
+        )
+      }).render()
+
+      expect(host.children.length).toBe(4)
+      expect(
+        Array.from(host.children).map(c =>
+          (c as HTMLElement).tagName.toLowerCase(),
+        ),
+      ).toEqual(['div', 'div', 'div', 'div'])
+      expect(Array.from(host.children).map(c => c.textContent)).toEqual([
+        'one',
+        'two',
+        'three',
+        'four',
+      ])
+
+      items.value = [
+        { key: 4, tag: 'div', text: 'four' },
+        { key: 3, tag: 'span', text: 'three' },
+        { key: 2, tag: 'span', text: 'two' },
+        { key: 1, tag: 'div', text: 'one' },
+      ]
+      await nextTick()
+
+      expect(host.children.length).toBe(4)
+      expect(
+        Array.from(host.children).map(c =>
+          (c as HTMLElement).tagName.toLowerCase(),
+        ),
+      ).toEqual(['div', 'span', 'span', 'div'])
+      expect(Array.from(host.children).map(c => c.textContent)).toEqual([
+        'four',
+        'three',
+        'two',
+        'one',
+      ])
+    })
+
+    test('children with the same tag, same key, but one with data and one without data', async () => {
+      const items = ref([{ key: 1, text: 'one', className: 'hi' }])
+      const { host } = define(() => {
+        const n1 = createFor(
+          () => items.value,
+          _for_item0 => {
+            const n2 = template('<div> </div>')() as any
+            const x2 = child(n2) as any
+
+            renderEffect(() => {
+              const _item = _for_item0.value
+              setText(x2, _item.text)
+
+              if (_item.className) {
+                setClass(n2, _item.className)
+              } else {
+                setClass(n2, null)
+              }
+            })
+
+            return n2
+          },
+          item => item.key,
+        )
+        return n1
+      }).render()
+
+      expect(host.children.length).toBe(1)
+      const firstChild = host.children[0] as HTMLDivElement
+      expect(firstChild.textContent?.trim()).toBe('one')
+      expect(firstChild.className).toBe('hi')
+
+      items.value = [{ key: 1, text: 'four', className: null as any }]
+      await nextTick()
+
+      expect(host.children.length).toBe(1)
+      const updatedChild = host.children[0] as HTMLDivElement
+      expect(updatedChild.textContent?.trim()).toBe('four')
+      expect(updatedChild.className).toBe('')
+
+      expect(updatedChild).toBe(firstChild)
+    })
+
+    test('should warn with duplicate keys', async () => {
+      const arr = ref<number[]>([1, 2, 3])
+      const { host, html } = render(arr)
+      expect(host.children.length).toBe(3)
+      expect(html()).toBe(
+        `<span>1</span><span>2</span><span>3</span><!--for-->`,
+      )
+
+      arr.value = [1, 2, 2]
+      await nextTick()
+      expect(host.children.length).toBe(3)
+      expect(html()).toBe(
+        `<span>1</span><span>2</span><span>2</span><!--for-->`,
+      )
+      expect(`Duplicate keys`).toHaveBeenWarned()
+    })
+  })
+
+  describe('renderer: unkeyed children', () => {
+    const render = (arr: Ref<number[]>) => {
+      return define({
+        setup() {
+          const n0 = createFor(
+            () => arr.value,
+            _for_item0 => {
+              const n2 = template('<span> </span>', 1)() as any
+              const x2 = child(n2) as any
+              renderEffect(() => setText(x2, toDisplayString(_for_item0.value)))
+              return n2
+            },
+          )
+          return n0
+        },
+      }).render()
+    }
+
+    test('move a key in non-keyed nodes with a size up', async () => {
+      const arr = ref<any[]>([1, 'a', 'b', 'c'])
+      const { host, html } = define({
+        setup() {
+          const n0 = createFor(
+            () => arr.value,
+            _for_item0 => {
+              const n2 = template('<span> </span>', 1)() as any
+              const x2 = child(n2) as any
+              renderEffect(() => setText(x2, toDisplayString(_for_item0.value)))
+              return n2
+            },
+            item => (typeof item === 'number' ? item : undefined),
+          )
+          return n0
+        },
+      }).render()
+
+      expect(host.children.length).toBe(4)
+      expect(html()).toBe(
+        `<span>1</span><span>a</span><span>b</span><span>c</span><!--for-->`,
+      )
+
+      arr.value = ['d', 'a', 'b', 'c', 1, 'e']
+      await nextTick()
+      expect(host.children.length).toBe(6)
+      expect(html()).toBe(
+        `<span>d</span><span>a</span><span>b</span><span>c</span>` +
+          `<span>1</span><span>e</span><!--for-->`,
+      )
+    })
+
+    test('append elements with updating children without keys', async () => {
+      const arr = ref<string[]>(['hello'])
+      const { html } = render(arr as any)
+      expect(html()).toBe('<span>hello</span><!--for-->')
+
+      arr.value = ['hello', 'world']
+      await nextTick()
+      expect(html()).toBe('<span>hello</span><span>world</span><!--for-->')
+    })
+
+    test('updating children without keys', async () => {
+      const arr = ref<string[]>(['hello', 'foo'])
+      const { html } = render(arr as any)
+      expect(html()).toBe('<span>hello</span><span>foo</span><!--for-->')
+
+      arr.value = ['hello', 'bar']
+      await nextTick()
+      expect(html()).toBe('<span>hello</span><span>bar</span><!--for-->')
+
+      arr.value = ['world', 'bar']
+      await nextTick()
+      expect(html()).toBe('<span>world</span><span>bar</span><!--for-->')
+    })
+
+    test('prepend element with updating children without keys', async () => {
+      const arr = ref<string[]>(['foo', 'bar'])
+      const { html } = render(arr as any)
+      expect(html()).toBe('<span>foo</span><span>bar</span><!--for-->')
+
+      arr.value = ['hello', 'foo', 'bar']
+      await nextTick()
+      expect(html()).toBe(
+        '<span>hello</span><span>foo</span><span>bar</span><!--for-->',
+      )
+    })
+
+    test('prepend element of different tag type with updating children without keys', async () => {
+      const items = ref([{ tag: 'span', text: 'world' }])
+      const { host, html } = define(() => {
+        return createFor(
+          () => items.value,
+          _for_item0 => {
+            const n2 = createIf(
+              () => _for_item0.value.tag === 'div',
+              () => {
+                const n4 = template('<div> </div>')() as any
+                const x4 = child(n4) as any
+                renderEffect(() =>
+                  setText(x4, toDisplayString(_for_item0.value.text)),
+                )
+                return n4
+              },
+              () => {
+                const n6 = template('<span> </span>', 1)() as any
+                const x6 = child(n6) as any
+                renderEffect(() =>
+                  setText(x6, toDisplayString(_for_item0.value.text)),
+                )
+                return n6
+              },
+            )
+            return n2
+          },
+        )
+      }).render()
+
+      expect(host.children.length).toBe(1)
+      expect(html()).toBe('<span>world</span><!--if--><!--for-->')
+
+      items.value = [
+        { tag: 'div', text: 'hello' },
+        { tag: 'span', text: 'world' },
+      ]
+      await nextTick()
+      expect(host.children.length).toBe(2)
+      expect(html()).toBe(
+        '<div>hello</div><!--if--><span>world</span><!--if--><!--for-->',
+      )
+    })
+
+    test('remove elements with updating children without keys', async () => {
+      const arr = ref<string[]>(['one', 'two', 'three'])
+      const { html } = render(arr as any)
+      expect(html()).toBe(
+        '<span>one</span><span>two</span><span>three</span><!--for-->',
+      )
+
+      arr.value = ['two']
+      await nextTick()
+      expect(html()).toBe('<span>two</span><!--for-->')
+    })
+
+    test('remove a single node when children are updated', async () => {
+      const arr = ref<string[]>(['one'])
+      const { html } = render(arr as any)
+      expect(html()).toBe('<span>one</span><!--for-->')
+
+      arr.value = ['two', 'three']
+      await nextTick()
+      expect(html()).toBe('<span>two</span><span>three</span><!--for-->')
+    })
+
+    test('reorder elements', async () => {
+      const arr = ref<string[]>(['one', 'two', 'three'])
+      const { html } = render(arr as any)
+      expect(html()).toBe(
+        '<span>one</span><span>two</span><span>three</span><!--for-->',
+      )
+
+      arr.value = ['three', 'two', 'one']
+      await nextTick()
+      expect(html()).toBe(
+        '<span>three</span><span>two</span><span>one</span><!--for-->',
+      )
+    })
+  })
+
+  describe('specialized block paths', () => {
+    const createTextSpan = (text: () => string) => {
+      const n2 = template('<span> </span>', 1)() as any
+      const x2 = child(n2) as any
+      renderEffect(() => setText(x2, text()))
+      return n2
+    }
+
+    test('single DOM node blocks can be reordered and removed', async () => {
+      const items = ref([
+        { id: 'a', text: 'A' },
+        { id: 'b', text: 'B' },
+        { id: 'c', text: 'C' },
+      ])
+
+      const { host, html } = define(() => {
+        return createFor(
+          () => items.value,
+          _for_item0 => createTextSpan(() => _for_item0.value.text),
+          item => item.id,
+          VaporVForFlags.IS_SINGLE_NODE,
+        )
+      }).render()
+      const firstNode = host.children[0]
+
+      expect(html()).toBe(
+        '<span>A</span><span>B</span><span>C</span><!--for-->',
+      )
+
+      items.value = [
+        { id: 'c', text: 'C' },
+        { id: 'a', text: 'A' },
+      ]
+      await nextTick()
+
+      expect(html()).toBe('<span>C</span><span>A</span><!--for-->')
+      expect(host.children[1]).toBe(firstNode)
+    })
+
+    test('dynamic component fragments can be reordered and removed', async () => {
+      const CompA = defineVaporComponent({
+        setup() {
+          return template('<i>A</i>')()
+        },
+      })
+      const CompB = defineVaporComponent({
+        setup() {
+          return template('<b>B</b>')()
+        },
+      })
+      const CompC = defineVaporComponent({
+        setup() {
+          return template('<em>C</em>')()
+        },
+      })
+      const items = shallowRef([
+        { id: 'a', comp: CompA },
+        { id: 'b', comp: CompB },
+        { id: 'c', comp: CompC },
+      ])
+
+      const { html } = define(() => {
+        return createFor(
+          () => items.value,
+          _for_item0 => createDynamicComponent(() => _for_item0.value.comp),
+          item => item.id,
+          VaporVForFlags.IS_FRAGMENT,
+        )
+      }).render()
+
+      expect(html()).toBe(
+        '<i>A</i><!--dynamic-component-->' +
+          '<b>B</b><!--dynamic-component-->' +
+          '<em>C</em><!--dynamic-component--><!--for-->',
+      )
+
+      items.value = [
+        { id: 'c', comp: CompC },
+        { id: 'a', comp: CompA },
+      ]
+      await nextTick()
+
+      expect(html()).toBe(
+        '<em>C</em><!--dynamic-component-->' +
+          '<i>A</i><!--dynamic-component--><!--for-->',
+      )
+    })
+
+    test('component blocks are unmounted when clearing with fast remove', async () => {
+      const items = ref([1, 2])
+      const unmounted = vi.fn()
+      const Child = defineVaporComponent({
+        setup() {
+          onUnmounted(unmounted)
+          return template('<span>child</span>')()
+        },
+      })
+
+      const { html } = define(() => {
+        return createFor(
+          () => items.value,
+          () => createComponent(Child),
+          undefined,
+          VaporVForFlags.FAST_REMOVE | VaporVForFlags.IS_COMPONENT,
+        )
+      }).render()
+
+      expect(html()).toBe('<span>child</span><span>child</span><!--for-->')
+
+      items.value = []
+      await nextTick()
+
+      expect(html()).toBe('<!--for-->')
+      expect(unmounted).toHaveBeenCalledTimes(2)
+    })
+
+    test('slot fallback fragments can be reordered and removed', async () => {
+      const items = ref([
+        { id: 'a', text: 'A' },
+        { id: 'b', text: 'B' },
+        { id: 'c', text: 'C' },
+      ])
+      const Child = defineVaporComponent({
+        setup() {
+          return createFor(
+            () => items.value,
+            _for_item0 =>
+              createSlot('default', null, () =>
+                createTextSpan(() => _for_item0.value.text),
+              ),
+            item => item.id,
+            VaporVForFlags.IS_FRAGMENT,
+          )
+        },
+      })
+
+      const { html } = define(() => createComponent(Child)).render()
+
+      expect(html()).toBe(
+        '<span>A</span><!--slot-->' +
+          '<span>B</span><!--slot-->' +
+          '<span>C</span><!--slot--><!--for-->',
+      )
+
+      items.value = [
+        { id: 'c', text: 'C' },
+        { id: 'a', text: 'A' },
+      ]
+      await nextTick()
+
+      expect(html()).toBe(
+        '<span>C</span><!--slot--><span>A</span><!--slot--><!--for-->',
+      )
+    })
+
+    test('keyed fragments can be reordered and removed', async () => {
+      const items = ref([
+        { id: 'a', text: 'A' },
+        { id: 'b', text: 'B' },
+        { id: 'c', text: 'C' },
+      ])
+
+      const { html } = define(() => {
+        return createFor(
+          () => items.value,
+          _for_item0 =>
+            createKeyedFragment(
+              () => _for_item0.value.id,
+              () => createTextSpan(() => _for_item0.value.text),
+            ),
+          item => item.id,
+          VaporVForFlags.IS_FRAGMENT,
+        )
+      }).render()
+
+      expect(html()).toBe(
+        '<span>A</span><!--keyed-->' +
+          '<span>B</span><!--keyed-->' +
+          '<span>C</span><!--keyed--><!--for-->',
+      )
+
+      items.value = [
+        { id: 'c', text: 'C' },
+        { id: 'a', text: 'A' },
+      ]
+      await nextTick()
+
+      expect(html()).toBe(
+        '<span>C</span><!--keyed--><span>A</span><!--keyed--><!--for-->',
+      )
+    })
+
+    test('nested v-for fragments can switch between empty and non-empty children', async () => {
+      const groups = ref([
+        { id: 'a', children: [1] },
+        { id: 'b', children: [] },
+        { id: 'c', children: [3] },
+      ])
+
+      const { html } = define(() => {
+        return createFor(
+          () => groups.value,
+          _for_item0 =>
+            createFor(
+              () => _for_item0.value.children,
+              _for_item1 =>
+                createTextSpan(
+                  () => `${_for_item0.value.id}:${_for_item1.value}`,
+                ),
+              item => item,
+              VaporVForFlags.IS_SINGLE_NODE,
+            ),
+          item => item.id,
+          VaporVForFlags.IS_FRAGMENT,
+        )
+      }).render()
+
+      expect(html()).toBe(
+        '<span>a:1</span><!--for--><!--for--><span>c:3</span><!--for--><!--for-->',
+      )
+
+      groups.value = [
+        { id: 'b', children: [2] },
+        { id: 'c', children: [] },
+        { id: 'a', children: [] },
+      ]
+      await nextTick()
+
+      expect(html()).toBe(
+        '<span>b:2</span><!--for--><!--for--><!--for--><!--for-->',
+      )
+    })
+
+    test('nested empty v-for fragment can be used as insertion anchor', async () => {
+      const groups = ref([
+        { id: 'a', children: [] },
+        { id: 'b', children: [2] },
+      ])
+
+      const { html } = define(() => {
+        return createFor(
+          () => groups.value,
+          _for_item0 =>
+            createFor(
+              () => _for_item0.value.children,
+              _for_item1 =>
+                createTextSpan(
+                  () => `${_for_item0.value.id}:${_for_item1.value}`,
+                ),
+              item => item,
+              VaporVForFlags.IS_SINGLE_NODE,
+            ),
+          item => item.id,
+          VaporVForFlags.IS_FRAGMENT,
+        )
+      }).render()
+
+      expect(html()).toBe('<!--for--><span>b:2</span><!--for--><!--for-->')
+
+      groups.value = [
+        { id: 'd', children: [4] },
+        { id: 'a', children: [] },
+        { id: 'b', children: [2] },
+      ]
+      await nextTick()
+
+      expect(html()).toBe(
+        '<span>d:4</span><!--for--><!--for--><span>b:2</span><!--for--><!--for-->',
+      )
+    })
+  })
+
+  describe('no cascading DOM moves', () => {
+    // Reordering must only move the blocks that are out of relative order
+    // (LIS-style), not every block between the old and new position.
+    async function countMoves(from: number[], to: number[]) {
+      const list = ref(from)
+      const { host } = define(() =>
+        createFor(
+          () => list.value,
+          item => {
+            const span = document.createElement('span')
+            renderEffect(() => {
+              span.textContent = `${item.value}`
+            })
+            return span
+          },
+          item => item,
+        ),
+      ).render()
+
+      const original = host.insertBefore.bind(host)
+      let count = 0
+      host.insertBefore = ((node: Node, anchor: Node | null) => {
+        count++
+        return original(node, anchor)
+      }) as any
+
+      list.value = to
+      await nextTick()
+      expect(
+        Array.from(host.querySelectorAll('span')).map(s =>
+          Number(s.textContent),
+        ),
+      ).toEqual(to)
+      return count
+    }
+
+    const range = (n: number) => Array.from({ length: n }, (_, i) => i)
+
+    test('moving a row backward performs a single move', async () => {
+      const to = range(50)
+      to.unshift(to.pop()!)
+      expect(await countMoves(range(50), to)).toBe(1)
+    })
+
+    test('moving a middle row to the front performs a single move', async () => {
+      const to = range(50)
+      const [x] = to.splice(25, 1)
+      to.unshift(x)
+      expect(await countMoves(range(50), to)).toBe(1)
+    })
+
+    // coverage guards: already optimal before the LIS rewrite, kept so a
+    // regression in forward moves / 2-element swaps stays caught
+    test('moving a row forward performs a single move', async () => {
+      const to = range(50)
+      to.push(to.shift()!)
+      expect(await countMoves(range(50), to)).toBe(1)
+    })
+
+    test('swapping two rows moves only those rows', async () => {
+      const to = range(50)
+      ;[to[1], to[48]] = [to[48], to[1]]
+      expect(await countMoves(range(50), to)).toBe(2)
+    })
+
+    // reviewer's counterexample: a coincidental in-place match in the middle
+    // of a shuffled range used to split the plan and cost ~2x the moves
+    test('a stationary row in the middle does not cascade moves', async () => {
+      expect(
+        await countMoves(
+          [0, 1, 2, 3, 4, 5, 6, 7, 8],
+          [5, 6, 7, 8, 4, 0, 1, 2, 3],
+        ),
+      ).toBe(5)
+    })
+
+    // a removal can leave an in-place match to the right of the moved row:
+    // the plan has to cover it, or the row is judged already in order
+    test('moving a reused row before a stationary one while removing', async () => {
+      expect(await countMoves([0, 1, 2], [2, 1])).toBe(1)
+    })
+
+    test('keeps a reused run in place when the row after it moves', async () => {
+      expect(await countMoves([0, 1, 2, 3, 4], [3, 4, 2])).toBe(1)
+    })
+
+    // guard: a plain insert shares one anchor, so it is one insert per new
+    // row and nothing else is touched (already true before the forward mount)
+    test('inserting rows only inserts the new rows', async () => {
+      expect(await countMoves(range(50), [...range(50), 50, 51, 52])).toBe(3)
+    })
+
+    test('reordering past a row that renders nothing keeps rows anchored', async () => {
+      const list = ref([1, 2, 3])
+      const { host } = define(() =>
+        createFor(
+          () => list.value,
+          item => {
+            if (item.value === 2) return [] as any
+            const span = document.createElement('span')
+            renderEffect(() => {
+              span.textContent = `${item.value}`
+            })
+            return span
+          },
+          item => item,
+        ),
+      ).render()
+
+      expect(host.innerHTML).toBe('<span>1</span><span>3</span><!--for-->')
+
+      // the empty block yields no anchor node; rows must still land inside
+      // the v-for range instead of being appended past its anchor
+      list.value = [3, 2, 1]
+      await nextTick()
+      expect(host.innerHTML).toBe('<span>3</span><span>1</span><!--for-->')
+    })
+  })
+
+  describe('insert creates rows in source order', () => {
+    // An insert into a keyed list mounts fresh rows only, so vapor creates
+    // them front to back like vdom's ordered pass. Apps observe that order
+    // through `setup` - directly, or through self registration via `inject` -
+    // so assert on a recorder, not on the dom, which was already correct.
+    const Row =
+      `<script setup>const props = defineProps(['it']); _components.record(props.it)</script>` +
+      `<template><span>{{ it }}</span></template>`
+    const keyed = `<components.Row v-for="it in data.list" :key="it" :it="it" />`
+
+    async function creationOrder(
+      template: string,
+      start: any[],
+      act: (list: any[]) => void,
+    ) {
+      const created: string[] = []
+      const order = {} as Record<'vdom' | 'vapor', string[]>
+      const { vdom, vapor } = await renderParity(
+        { Row, App: `<template><div>${template}</div></template>` },
+        () => ref({ list: [...start] }),
+        async (data, _root, mode) => {
+          // only the update is under test; drop the initial render
+          created.length = 0
+          act(data.value.list)
+          await nextTick()
+          order[mode] = created.slice()
+        },
+        { record: (it: any) => created.push(String(it)) },
+      )
+      expect(vapor.text).toBe(vdom.text)
+      return { order, text: vapor.text }
+    }
+
+    test('appending to a non-empty keyed list', async () => {
+      const { order, text } = await creationOrder(keyed, [1], list =>
+        list.push(2, 3),
+      )
+      expect(order.vapor).toEqual(['2', '3'])
+      expect(order.vapor).toEqual(order.vdom)
+      expect(text).toBe('123')
+    })
+
+    test('inserting in the middle of a keyed list', async () => {
+      const { order, text } = await creationOrder(keyed, [1, 2, 3], list =>
+        list.splice(1, 0, 'a', 'b'),
+      )
+      expect(order.vapor).toEqual(['a', 'b'])
+      expect(order.vapor).toEqual(order.vdom)
+      expect(text).toBe('1ab23')
+    })
+
+    test('inserting at the head of a keyed list', async () => {
+      const { order, text } = await creationOrder(keyed, [1, 2, 3], list =>
+        list.unshift('a', 'b'),
+      )
+      expect(order.vapor).toEqual(['a', 'b'])
+      expect(order.vapor).toEqual(order.vdom)
+      expect(text).toBe('ab123')
+    })
+
+    // the user-visible symptom: a teleport appends its content to the target
+    // as the row is created, so creation order is the order it lands in
+    test('teleported rows land in their target in source order', async () => {
+      const targets: HTMLElement[] = []
+      const landed = {} as Record<'vdom' | 'vapor', string>
+      await renderParity(
+        {
+          App:
+            `<template><Teleport v-for="it in data.list" :key="it" :to="data.target">` +
+            `t{{ it }}</Teleport></template>`,
+        },
+        () => {
+          const target = document.createElement('div')
+          document.body.appendChild(target)
+          targets.push(target)
+          return ref({ list: [1], target })
+        },
+        async (data, _root, mode) => {
+          data.value.list.push(2, 3)
+          await nextTick()
+          landed[mode] = data.value.target.textContent
+        },
+      )
+      targets.forEach(target => target.remove())
+      expect(landed.vapor).toBe('t1t2t3')
+      expect(landed.vapor).toBe(landed.vdom)
+    })
+
+    // guards: these two paths mounted forward already
+    test('mounting into an empty list', async () => {
+      const { order } = await creationOrder(keyed, [], list =>
+        list.push(1, 2, 3),
+      )
+      expect(order.vapor).toEqual(['1', '2', '3'])
+      expect(order.vapor).toEqual(order.vdom)
+    })
+
+    test('appending to an unkeyed list', async () => {
+      const { order } = await creationOrder(
+        `<components.Row v-for="it in data.list" :it="it" />`,
+        [1],
+        list => list.push(2, 3),
+      )
+      expect(order.vapor).toEqual(['2', '3'])
+      expect(order.vapor).toEqual(order.vdom)
+    })
+
+    // vdom does not order rows front to back in general - its reorder pass is
+    // deliberately backwards - and neither does vapor. Only an insert with
+    // nothing to pair up is ordered; these pin the rest to whatever vdom does
+    // so the change is not read as a general ordering contract.
+    test('two separate inserts in one tick stay back to front, like vdom', async () => {
+      const { order, text } = await creationOrder(keyed, [1, 2, 3], list =>
+        list.splice(0, 3, 1, 'a', 'b', 2, 'c', 'd', 3),
+      )
+      expect(order.vapor).toEqual(['d', 'c', 'b', 'a'])
+      expect(order.vapor).toEqual(order.vdom)
+      expect(text).toBe('1ab2cd3')
+    })
+
+    test('an insert mixed with a move stays back to front, like vdom', async () => {
+      const { order, text } = await creationOrder(keyed, [1, 2, 3], list =>
+        list.splice(0, 3, 'a', 3, 'b', 1, 2),
+      )
+      expect(order.vapor).toEqual(['b', 'a'])
+      expect(order.vapor).toEqual(order.vdom)
+      expect(text).toBe('a3b12')
+    })
+  })
+})
+
+test('resolves component bindings in key callback defaults', async () => {
+  const items = ref<(string | undefined)[]>([undefined])
+  const fallback = ref('A')
+  const { host } = define({
+    setup: () => ({ items, fallback }),
+    render: compileToVaporRender(
+      `<li v-for="(item = fallback, i) in items" :key="i">{{ item }}</li>`,
+    ),
+  }).render()
+  expect(host.textContent).toBe('A')
+
+  fallback.value = 'B'
+  items.value.push('C')
+  await nextTick()
+  expect(host.textContent).toBe('BC')
+})
+
+test('resolves outer loop aliases in key callback defaults', async () => {
+  const { vdom, vapor } = await renderParity(
+    {
+      App: `<template><div v-for="row in data.rows"><span v-for="(item = row.fallback, i) in row.items" :key="i">{{ item }}</span></div></template>`,
+    },
+    () => ref({ rows: [{ fallback: 'A', items: [undefined] }] }),
+    async (data, root) => {
+      expect(root.textContent).toBe('A')
+      data.value.rows[0].fallback = 'B'
+      data.value.rows[0].items = ['C', undefined]
+      await nextTick()
+    },
+  )
+  expect(vdom.text).toBe('CB')
+  expect(vapor.text).toBe(vdom.text)
+})
+
+test('unwraps refs in dynamic slot callback defaults', async () => {
+  const { vdom, vapor } = await renderParity(
+    {
+      Child: `<template><p><slot name="a" /><slot name="b" /></p></template>`,
+      App: `<script setup>
+        import { ref } from 'vue'
+        const items = ref([undefined])
+        const fallback = ref('a')
+        const components = _components
+      </script>
+      <template>
+        <button @click="fallback = 'b'">next</button>
+        <components.Child>
+          <template v-for="(item = fallback, i) in items" #[item] :key="i">{{ item }}</template>
+        </components.Child>
+      </template>`,
+    },
+    () => ref(null),
+    async (_, root) => {
+      expect(root.querySelector('p')!.textContent).toBe('a')
+      root.querySelector('button')!.click()
+      await nextTick()
+      expect(root.querySelector('p')!.textContent).toBe('b')
+    },
+  )
+  expect(vdom.text).toBe('nextb')
+  expect(vapor.text).toBe(vdom.text)
+})
+
+test('preserves the index position when the key alias is omitted', async () => {
+  const { vdom, vapor } = await renderParity(
+    {
+      App: `<template><span v-for="(value, , index) in data" :key="value">{{ value }}:{{ index }}</span></template>`,
+    },
+    () => ref({ a: 'A', b: 'B' }),
+    async (data, root) => {
+      expect(root.textContent).toBe('A:0B:1')
+      data.value = { b: 'B', a: 'A' }
+      await nextTick()
+      expect(root.textContent).toBe('B:0A:1')
+    },
+  )
+  expect(vapor.text).toBe(vdom.text)
+})
+
+test('keys items by the :key same-name shorthand', async () => {
+  const moved: Record<string, boolean> = {}
+  const { vdom, vapor } = await renderParity(
+    {
+      App: `<template><input v-for="(value, key) in data" :key :value="value"></template>`,
+    },
+    () => ref<Record<string, number>>({ a: 1, b: 2, c: 3 }),
+    async (data, root, mode) => {
+      const first = root.querySelector('input')!
+      data.value = { c: 3, b: 2, a: 1 }
+      await nextTick()
+      moved[mode] = root.querySelectorAll('input')[2] === first
+    },
+  )
+  expect(moved.vdom).toBe(true)
+  expect(moved.vapor).toBe(moved.vdom)
+  expect(vapor.text).toBe(vdom.text)
+})
+
+test('resolves destructure defaults that reference a sibling alias', async () => {
+  const titles: Record<string, string> = {}
+  const { vdom, vapor } = await renderParity(
+    {
+      App: `<template><a v-for="({ label, href, title = label }, index) in data" :key="href" :href :title>{{ index }}:{{ title }}</a></template>`,
+    },
+    () =>
+      ref<{ label: string; href: string; title?: string }[]>([
+        { label: 'Docs', href: '/docs' },
+        { label: 'Repo', href: '/repo', title: 'Source' },
+      ]),
+    async (data, root, mode) => {
+      data.value[0].title = 'Guide'
+      data.value[1].title = undefined
+      data.value[1].label = 'Code'
+      await nextTick()
+      titles[mode] = Array.from(root.querySelectorAll('a'), a => a.title).join()
+    },
+  )
+  expect(vdom.text).toBe('0:Guide1:Code')
+  expect(vapor.text).toBe(vdom.text)
+  expect(titles.vdom).toBe('Guide,Code')
+  expect(titles.vapor).toBe(titles.vdom)
+})
+
+test.each([
+  [
+    '{ b: { c } = { c: 1 } }',
+    '{{ c }}',
+    [{ b: {} }, {}, { b: { c: 2 } }],
+    ',1,2,',
+  ],
+  ['({ a } = { a: 1 })', '{{ a }}', [undefined, { a: 2 }], '1,2,'],
+  [
+    '{ b: { c, ...r } = { c: 1, d: 2 } }',
+    '{{ c }}{{ r.d }}',
+    [{}, { b: { c: 3, d: 4 } }],
+    '12,34,',
+  ],
+])(
+  'destructure defaults apply at their own level like vdom: %s',
+  async (alias, body, list, expected) => {
+    const { vdom, vapor } = await renderParity(
+      { App: `<template><i v-for="${alias} in data">${body},</i></template>` },
+      () => ref<any[]>(list),
+      () => {},
+    )
+    expect(vdom.text).toBe(expected)
+    expect(vapor.text).toBe(vdom.text)
+  },
+)
+test('renders nothing for an invalid range in prod', async () => {
+  __DEV__ = false
+  try {
+    const html: Record<string, string[]> = {}
+    const { vdom, vapor } = await renderParity(
+      {
+        App: `<template><div><span v-for="i in data.n">{{ i }}</span></div></template>`,
+      },
+      () => ref({ n: -1 }),
+      async (data, root, mode) => {
+        const seen = [root.innerHTML]
+        for (const n of [2, 3.1, 1, NaN]) {
+          data.value.n = n
+          await nextTick()
+          seen.push(root.innerHTML)
+        }
+        html[mode] = seen
+      },
+    )
+    expect(html.vdom).toEqual([
+      '<div></div>',
+      '<div><span>1</span><span>2</span></div>',
+      '<div></div>',
+      '<div><span>1</span></div>',
+      '<div></div>',
+    ])
+    expect(html.vapor).toEqual(html.vdom)
+    expect(vapor.text).toBe(vdom.text)
+  } finally {
+    __DEV__ = true
+  }
+})
+
+test('keeps refs in the source as items like vdom', async () => {
+  const html: Record<string, string[]> = {}
+  const { vdom, vapor } = await renderParity(
+    {
+      App: `<template><i v-for="(r, i) in data" :key="i">{{ r.value }}</i></template>`,
+    },
+    () => ref([ref('a'), ref('b')]),
+    async (data, root, mode) => {
+      const seen = [root.innerHTML]
+      data.value.reverse()
+      await nextTick()
+      seen.push(root.innerHTML)
+      data.value.push(ref('c'))
+      await nextTick()
+      seen.push(root.innerHTML)
+      html[mode] = seen
+    },
+  )
+  expect(html.vdom).toEqual([
+    '<i>a</i><i>b</i>',
+    '<i>b</i><i>a</i>',
+    '<i>b</i><i>a</i><i>c</i>',
+  ])
+  expect(html.vapor.map(h => h.replace(/<!--for-->/g, ''))).toEqual(html.vdom)
+  expect(vapor.text).toBe(vdom.text)
+})
+
+test('keeps refs in the source as items of v-for slots like vdom', async () => {
+  const { vdom, vapor } = await renderParity(
+    {
+      Child: `<template><slot name="a" />|<slot name="b" /></template>`,
+      App: `<template><components.Child><template v-for="r in data" #[r.value]>{{ r.value }}</template></components.Child></template>`,
+    },
+    () => ref([ref('a'), ref('b')]),
+    async data => {
+      data.value.reverse()
+      await nextTick()
+    },
+  )
+  expect(vdom.text).toBe('a|b')
+  expect(vapor.text).toBe(vdom.text)
+})
+
+test('does not overwrite source refs when appending rows', async () => {
+  await renderParity(
+    {
+      App: `<template><i v-for="(r, i) in data" :key="i">x</i></template>`,
+    },
+    () => shallowRef([ref('a')]),
+    async (data, root) => {
+      const a = data.value[0]
+      data.value = [a, ref('b')]
+      await nextTick()
+      expect(root.textContent).toBe('xx')
+      expect(a.value).toBe('a')
+    },
+  )
+})
+
+function getEffectsCount(scope: { deps: any }) {
+  let count = 0
+  for (let dep = scope.deps; dep !== undefined; dep = dep.nextDep) {
+    count++
+  }
+  return count
+}

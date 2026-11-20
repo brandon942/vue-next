@@ -1,0 +1,448 @@
+import {
+  EffectScope,
+  type Ref,
+  WatchErrorCodes,
+  type WatchOptions,
+  computed,
+  effect,
+  onEffectCleanup,
+  onWatcherCleanup,
+  ref,
+  watch,
+} from '../src'
+
+describe('watch', () => {
+  test('effect', () => {
+    let dummy: any
+    const source = ref(0)
+    watch(() => {
+      dummy = source.value
+    })
+    expect(dummy).toBe(0)
+    source.value++
+    expect(dummy).toBe(1)
+  })
+
+  test('with callback', () => {
+    let dummy: any
+    const source = ref(0)
+    watch(source, () => {
+      dummy = source.value
+    })
+    expect(dummy).toBe(undefined)
+    source.value++
+    expect(dummy).toBe(1)
+  })
+
+  test('call option with error handling', () => {
+    const onError = vi.fn()
+    const call: WatchOptions['call'] = function call(fn, type, args) {
+      if (Array.isArray(fn)) {
+        fn.forEach(f => call(f, type, args))
+        return
+      }
+      try {
+        fn.apply(null, args)
+      } catch (e) {
+        onError(e, type)
+      }
+    }
+
+    watch(
+      () => {
+        throw 'oops in effect'
+      },
+      null,
+      { call },
+    )
+
+    const source = ref(0)
+    const effect = watch(
+      source,
+      () => {
+        onWatcherCleanup(() => {
+          throw 'oops in cleanup'
+        })
+        throw 'oops in watch'
+      },
+      { call },
+    )
+
+    expect(onError.mock.calls.length).toBe(1)
+    expect(onError.mock.calls[0]).toMatchObject([
+      'oops in effect',
+      WatchErrorCodes.WATCH_CALLBACK,
+    ])
+
+    source.value++
+    expect(onError.mock.calls.length).toBe(2)
+    expect(onError.mock.calls[1]).toMatchObject([
+      'oops in watch',
+      WatchErrorCodes.WATCH_CALLBACK,
+    ])
+
+    effect!.stop()
+    source.value++
+    expect(onError.mock.calls.length).toBe(3)
+    expect(onError.mock.calls[2]).toMatchObject([
+      'oops in cleanup',
+      WatchErrorCodes.WATCH_CLEANUP,
+    ])
+  })
+
+  test('call option with async error handling', async () => {
+    const onError = vi.fn()
+    const call: WatchOptions['call'] = function call(fn, type, args) {
+      if (Array.isArray(fn)) {
+        fn.forEach(f => call(f, type, args))
+        return
+      }
+      fn.apply(null, args).catch((error: unknown) => {
+        onError(error)
+      })
+    }
+
+    const source1 = ref(0)
+    watch(
+      source1,
+      async () => {
+        throw 'oops in watch'
+      },
+      { call },
+    )
+
+    source1.value++
+    await Promise.resolve()
+    expect(onError.mock.calls.length).toBe(1)
+    expect(onError.mock.calls[0]).toMatchObject(['oops in watch'])
+
+    const source2 = ref(0)
+    watch(
+      source2,
+      async () => {
+        throw 'oops in once watch'
+      },
+      { call, once: true },
+    )
+
+    source2.value++
+    await Promise.resolve()
+    expect(onError.mock.calls.length).toBe(2)
+    expect(onError.mock.calls[1]).toMatchObject(['oops in once watch'])
+  })
+
+  test('watch with onWatcherCleanup', async () => {
+    let dummy = 0
+    let source: Ref<number>
+    const scope = new EffectScope()
+
+    scope.run(() => {
+      source = ref(0)
+      watch(onCleanup => {
+        source.value
+
+        onCleanup(() => (dummy += 2))
+        onWatcherCleanup(() => (dummy += 3))
+        onWatcherCleanup(() => (dummy += 5))
+      })
+    })
+    expect(dummy).toBe(0)
+
+    scope.run(() => {
+      source.value++
+    })
+    expect(dummy).toBe(10)
+
+    scope.run(() => {
+      source.value++
+    })
+    expect(dummy).toBe(20)
+
+    scope.stop()
+    expect(dummy).toBe(30)
+  })
+
+  test('once option should be ignored by simple watch', async () => {
+    let dummy: any
+    const source = ref(0)
+    watch(
+      () => {
+        dummy = source.value
+      },
+      null,
+      { once: true },
+    )
+    expect(dummy).toBe(0)
+
+    source.value++
+    expect(dummy).toBe(1)
+  })
+
+  // #12033
+  test('recursive sync watcher on computed', () => {
+    const r = ref(0)
+    const c = computed(() => r.value)
+
+    watch(c, v => {
+      if (v > 1) {
+        r.value--
+      }
+    })
+
+    expect(r.value).toBe(0)
+    expect(c.value).toBe(0)
+
+    r.value = 10
+    expect(r.value).toBe(1)
+    expect(c.value).toBe(1)
+  })
+
+  // edge case where a nested endBatch() causes an effect to be batched in a
+  // nested batch loop with its .next mutated, causing the outer loop to end
+  // early
+  test('nested batch edge case', () => {
+    // useClamp from VueUse
+    const clamp = (n: number, min: number, max: number) =>
+      Math.min(max, Math.max(min, n))
+    function useClamp(src: Ref<number>, min: number, max: number) {
+      return computed({
+        get() {
+          return (src.value = clamp(src.value, min, max))
+        },
+        set(val) {
+          src.value = clamp(val, min, max)
+        },
+      })
+    }
+
+    const src = ref(1)
+    const clamped = useClamp(src, 1, 5)
+    watch(src, val => (clamped.value = val))
+
+    const spy = vi.fn()
+    watch(clamped, spy)
+
+    src.value = 2
+    expect(spy).toHaveBeenCalledTimes(1)
+    src.value = 10
+    expect(spy).toHaveBeenCalledTimes(2)
+  })
+
+  test('should ensure correct execution order in batch processing', () => {
+    const dummy: number[] = []
+    const n1 = ref(0)
+    const n2 = ref(0)
+    const sum = computed(() => n1.value + n2.value)
+    watch(n1, () => {
+      dummy.push(1)
+      n2.value++
+    })
+    watch(sum, () => dummy.push(2))
+    watch(n1, () => dummy.push(3))
+
+    n1.value++
+
+    expect(dummy).toEqual([1, 2, 3])
+  })
+
+  test('watch with immediate reset and sync flush', () => {
+    const value = ref(false)
+
+    watch(value, () => {
+      value.value = false
+    })
+
+    value.value = true
+    value.value = true
+    expect(value.value).toBe(false)
+  })
+
+  // #15765
+  test.each([false, true])(
+    'should preserve callback cleanups when getter values are unchanged (multiple sources: %s)',
+    multiple => {
+      const source = ref(1)
+      const onCleanup = vi.fn()
+      const onWatcherCleanupSpy = vi.fn()
+      const cb = vi.fn((_value, _oldValue, cleanup) => {
+        cleanup(onCleanup)
+        onWatcherCleanup(onWatcherCleanupSpy)
+      })
+      const getter = () => source.value > 0
+      const stop = watch(multiple ? [getter] : getter, cb, { immediate: true })
+
+      source.value++
+      expect(cb).toHaveBeenCalledTimes(1)
+      expect(onCleanup).not.toHaveBeenCalled()
+      expect(onWatcherCleanupSpy).not.toHaveBeenCalled()
+
+      stop()
+      expect(onCleanup).toHaveBeenCalledTimes(1)
+      expect(onWatcherCleanupSpy).toHaveBeenCalledTimes(1)
+    },
+  )
+
+  test('should clean up getter effects separately from watch callbacks', () => {
+    const source = ref(1)
+    const calls: string[] = []
+    const stop = watch(
+      () => {
+        calls.push('getter')
+        onEffectCleanup(() => calls.push('getter cleanup'))
+        return source.value > 0
+      },
+      (_value, _oldValue, onCleanup) => {
+        calls.push('callback')
+        onCleanup(() => calls.push('callback cleanup'))
+      },
+      { immediate: true },
+    )
+    expect(calls).toEqual(['getter', 'callback'])
+
+    calls.length = 0
+    source.value++
+    expect(calls).toEqual(['getter cleanup', 'getter'])
+
+    calls.length = 0
+    source.value = 0
+    expect(calls).toEqual([
+      'getter cleanup',
+      'getter',
+      'callback cleanup',
+      'callback',
+    ])
+
+    calls.length = 0
+    stop()
+    expect(calls).toEqual(['getter cleanup', 'callback cleanup'])
+  })
+
+  test('should preserve mixed cleanup registration order in watchEffect', () => {
+    const source = ref(0)
+    const calls: string[] = []
+    const stop = watch(onCleanup => {
+      source.value
+      onWatcherCleanup(() => calls.push('watcher'))
+      onEffectCleanup(() => calls.push('effect'))
+      onCleanup(() => calls.push('bound'))
+    })
+    expect(calls).toEqual([])
+
+    source.value++
+    expect(calls).toEqual(['watcher', 'effect', 'bound'])
+
+    calls.length = 0
+    stop()
+    expect(calls).toEqual(['watcher', 'effect', 'bound'])
+    stop()
+    expect(calls).toEqual(['watcher', 'effect', 'bound'])
+  })
+
+  test('should preserve cleanups registered during synchronous cleanup reentry', () => {
+    const source = ref(0)
+    const cleaned: number[] = []
+    const active = new Set<number>()
+    const stop = watch(
+      source,
+      value => {
+        active.add(value)
+        onWatcherCleanup(() => {
+          cleaned.push(value)
+          active.delete(value)
+          if (value === 0 && source.value === 1) {
+            source.value = 2
+          }
+        })
+      },
+      { immediate: true },
+    )
+
+    source.value = 1
+    expect(cleaned).toEqual([0])
+    expect([...active]).toEqual([2, 1])
+
+    stop()
+    expect(cleaned).toEqual([0, 2, 1])
+    expect(active.size).toBe(0)
+  })
+
+  test('once watcher should stop when its callback throws', () => {
+    const source = ref(0)
+    const callback = vi.fn(() => {
+      throw new Error('oops')
+    })
+    watch(source, callback, { once: true })
+
+    expect(() => (source.value = 1)).toThrow('oops')
+    expect(() => (source.value = 2)).not.toThrow()
+    expect(callback).toHaveBeenCalledTimes(1)
+  })
+
+  // #5009
+  test('should not track deps of cleanup and callback run inside another effect', () => {
+    const source = ref(0)
+    const dep = ref(0)
+    const cb = vi.fn(() => {
+      dep.value
+      onWatcherCleanup(() => dep.value)
+    })
+    watch(source, cb)
+    source.value++
+    expect(cb).toHaveBeenCalledTimes(1)
+
+    const fn = vi.fn(() => {
+      source.value = 10
+    })
+    effect(fn)
+    expect(cb).toHaveBeenCalledTimes(2)
+    expect(fn).toHaveBeenCalledTimes(1)
+
+    dep.value++
+    expect(fn).toHaveBeenCalledTimes(1)
+  })
+
+  test('should restore tracking when cleanup throws inside another effect', () => {
+    const source = ref(0)
+    const dep = ref(0)
+    const err = new Error('cleanup error')
+    watch(source, () => {
+      onWatcherCleanup(() => {
+        throw err
+      })
+    })
+    source.value++
+
+    let dummy
+    let caught
+    effect(() => {
+      try {
+        source.value = 10
+      } catch (e) {
+        caught = e
+      }
+      dummy = dep.value
+    })
+    expect(caught).toBe(err)
+    expect(dummy).toBe(0)
+
+    dep.value++
+    expect(dummy).toBe(1)
+  })
+
+  test('should keep firing after the watched computed throws', () => {
+    const s = ref(0)
+    const c = computed(() => {
+      if (s.value === 1) throw new Error('boom')
+      return s.value
+    })
+    const calls: number[] = []
+    watch(c, v => {
+      calls.push(v)
+    })
+
+    expect(() => (s.value = 1)).toThrow('boom')
+    s.value = 2
+    s.value = 3
+    expect(calls).toEqual([2, 3])
+  })
+})

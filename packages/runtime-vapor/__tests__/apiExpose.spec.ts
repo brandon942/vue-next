@@ -1,0 +1,190 @@
+import { computed, ref, shallowRef } from '@vue/reactivity'
+import {
+  type VaporComponentInstance,
+  createComponent,
+  isVaporComponent,
+} from '../src/component'
+import { createTemplateRefSetter } from '../src/apiTemplateRef'
+import { compile, makeRender } from './_utils'
+import { currentInstance } from '@vue/runtime-dom'
+import { defineVaporComponent } from '../src/apiDefineComponent'
+
+const define = makeRender()
+
+describe('api: expose', () => {
+  test('via setup context + template ref', () => {
+    let i: any
+    const Child = defineVaporComponent({
+      setup(_, { expose }) {
+        expose({
+          foo: 1,
+          bar: ref(2),
+        })
+        return []
+      },
+    })
+    const childRef = ref()
+    define({
+      setup: () => {
+        const n0 = (i = createComponent(Child))
+        const setRef = createTemplateRefSetter()
+        setRef(n0, childRef)
+        return n0
+      },
+    }).render()
+
+    expect(childRef.value).toBe(i.exposeProxy)
+    expect(childRef.value.foo).toBe(1)
+    expect(childRef.value.bar).toBe(2)
+    expect(childRef.value.baz).toBeUndefined()
+  })
+
+  test('writes through template ref update exposed refs', () => {
+    const count = ref(1)
+    const n = ref(1)
+    const double = computed({
+      get: () => n.value * 2,
+      set: v => (n.value = v / 2),
+    })
+    const readonlyDouble = computed(() => n.value * 2)
+    const obj = shallowRef({ n: 1 })
+    const Child = defineVaporComponent({
+      setup(_, { expose }) {
+        expose({ count, double, readonlyDouble, obj, plain: 1 })
+        return []
+      },
+    })
+    const childRef = ref()
+    define({
+      setup: () => {
+        const n0 = createComponent(Child)
+        const setRef = createTemplateRefSetter()
+        setRef(n0, childRef)
+        return n0
+      },
+    }).render()
+
+    childRef.value.count = 10
+    expect(count.value).toBe(10)
+    expect(childRef.value.count).toBe(10)
+
+    childRef.value.double = 40
+    expect(n.value).toBe(20)
+    expect(childRef.value.double).toBe(40)
+
+    childRef.value.obj = { n: 7 }
+    expect(obj.value).toEqual({ n: 7 })
+
+    childRef.value.plain = 2
+    expect(childRef.value.plain).toBe(2)
+
+    childRef.value.readonlyDouble = 1
+    expect('computed value is readonly').toHaveBeenWarned()
+    expect(childRef.value.readonlyDouble).toBe(40)
+  })
+
+  test('via setup context + template ref (expose empty)', () => {
+    let childInstance: VaporComponentInstance | null = null
+    const Child = defineVaporComponent({
+      setup(_) {
+        childInstance = currentInstance as VaporComponentInstance
+        return []
+      },
+    })
+    const childRef = shallowRef()
+    define({
+      setup: () => {
+        const n0 = createComponent(Child)
+        const setRef = createTemplateRefSetter()
+        setRef(n0, childRef)
+        return n0
+      },
+    }).render()
+
+    expect(childInstance!.exposed).toBeNull()
+    expect(childRef.value).toBe(childInstance!.exposeProxy)
+    expect(Object.keys(childRef.value)).toEqual([])
+  })
+
+  test('with mount', () => {
+    const { app, host } = define({
+      setup(_, { expose }) {
+        expose({
+          foo: 1,
+        })
+        return []
+      },
+    }).create()
+    const exposed = app.mount(host) as any
+    expect(exposed.foo).toBe(1)
+    expect(exposed.bar).toBe(undefined)
+  })
+
+  test('warning for ref', () => {
+    define({
+      setup(_, { expose }) {
+        expose(ref(1))
+        return []
+      },
+    }).render()
+
+    expect(
+      'expose() should be passed a plain object, received ref',
+    ).toHaveBeenWarned()
+  })
+
+  test('warning for array', () => {
+    define({
+      setup(_, { expose }) {
+        expose(['focus'])
+        return []
+      },
+    }).render()
+
+    expect(
+      'expose() should be passed a plain object, received array',
+    ).toHaveBeenWarned()
+  })
+
+  test('warning for function', () => {
+    define({
+      setup(_, { expose }) {
+        expose(() => null)
+        return []
+      },
+    }).render()
+
+    expect(
+      'expose() should be passed a plain object, received function',
+    ).toHaveBeenWarned()
+  })
+
+  test('template ref to a child without defineExpose is a closed object', () => {
+    const data = ref<any>(null)
+    const Child = compile(`<template><div /></template>`, data)
+    const App = compile(
+      `<script setup vapor>
+        import { ref } from 'vue'
+        const Child = _components.Child
+        const child = ref()
+        _data.value = () => child.value
+      </script>
+      <template>
+        <Child ref="child" />
+      </template>`,
+      data,
+      { Child },
+    )
+    define(App).render()
+
+    const child = data.value()
+    expect(isVaporComponent(child)).toBe(false)
+    expect(Object.keys(child)).toEqual([])
+  })
+
+  test('mount returns a closed object for a root without defineExpose', () => {
+    const App = compile(`<template><div /></template>`, ref())
+    const { app, host } = define(App).create()
+    expect(Object.keys(app.mount(host) as any)).toEqual([])
+  })
+})

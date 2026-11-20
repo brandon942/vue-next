@@ -1,0 +1,347 @@
+import {
+  type AttributeNode,
+  type DirectiveNode,
+  type ElementNode,
+  ElementTypes,
+  ErrorCodes,
+  NodeTypes,
+  type SimpleExpressionNode,
+  type TemplateChildNode,
+  createCompilerError,
+  createSimpleExpression,
+  isCommentOrWhitespace,
+} from '@vue/compiler-dom'
+import {
+  type NodeTransform,
+  type TransformContext,
+  createStructuralDirectiveTransform,
+  isComponentNode,
+} from '../transform'
+import {
+  type BlockIRNode,
+  DynamicFlag,
+  type IRDynamicInfo,
+  IRNodeTypes,
+  type IfIRNode,
+  type VaporDirectiveNode,
+} from '../ir'
+import { VaporBlockShape, VaporIfFlags, extend } from '@vue/shared'
+import { newBlock, wrapTemplate } from './utils'
+import { getSiblingIf } from './transformComment'
+import {
+  findProp,
+  getBlockShape,
+  isInTransition,
+  isStaticExpression,
+} from '../utils'
+
+export const transformVIf: NodeTransform = createStructuralDirectiveTransform(
+  ['if', 'else', 'else-if'],
+  processIf,
+)
+
+export function processIf(
+  node: ElementNode,
+  dir: VaporDirectiveNode,
+  context: TransformContext<ElementNode>,
+): (() => void) | undefined {
+  if (dir.name !== 'else' && (!dir.exp || !dir.exp.content.trim())) {
+    const loc = dir.exp ? dir.exp.loc : node.loc
+    context.options.onError(
+      createCompilerError(ErrorCodes.X_V_IF_NO_EXPRESSION, dir.loc),
+    )
+    dir.exp = createSimpleExpression(`true`, false, loc)
+  }
+
+  context.dynamic.flags |= DynamicFlag.NON_TEMPLATE
+  // Nested dynamic units are owned by an enclosing branch scope, so only mark
+  // root-block branches with the compiler-proven no-scope flag.
+  const allowNoScope = context.block === context.root.block
+  if (dir.name === 'if') {
+    const id = context.reference()
+    context.dynamic.flags |= DynamicFlag.INSERT
+    const [branch, onExit] = createIfBranch(node, context)
+
+    return () => {
+      onExit()
+      const operation: IfIRNode = {
+        type: IRNodeTypes.IF,
+        id,
+        ...context.effectBoundary(),
+        blockShape: encodeIfBlockShape(branch, undefined, allowNoScope),
+        condition: dir.exp!,
+        positive: branch,
+        index: context.root.nextIfIndex(),
+        once:
+          context.inVOnce ||
+          isStaticExpression(dir.exp!, context.options.bindingMetadata),
+      }
+      context.dynamic.operation = operation
+      context.root.ifHeads.set(operation, context.inVOnce)
+      const parent = context.parent!
+      parent.ifHead = parent.ifTail = operation
+    }
+  } else {
+    // check the adjacent v-if
+    const siblingIf = getSiblingIf(context, true)
+    const parent = context.parent
+    const head = parent && parent.ifHead
+
+    if (
+      // check if v-if is the sibling node
+      !siblingIf ||
+      // check if a preceding sibling started a chain
+      !head
+    ) {
+      context.options.onError(
+        createCompilerError(ErrorCodes.X_V_ELSE_NO_ADJACENT_IF, node.loc),
+      )
+      return
+    }
+
+    const lastIfNode = parent.ifTail!
+
+    // vdom caches the whole conditional for `v-once` on its head and drops
+    // `v-once` on the other branches: this branch is in v-once only through
+    // an ancestor or the head
+    context.inVOnce =
+      (parent.inVOnce && !isComponentNode(parent.node)) ||
+      !!context.root.ifHeads.get(head)
+
+    // Check if v-else was followed by v-else-if
+    if (dir.name === 'else-if' && lastIfNode.negative) {
+      context.options.onError(
+        createCompilerError(ErrorCodes.X_V_ELSE_NO_ADJACENT_IF, node.loc),
+      )
+    }
+
+    // check if user is forcing same key on different branches
+    if (__DEV__ || !__BROWSER__) {
+      checkSameKey(node, context)
+    }
+
+    if (!context.inVOnce) {
+      // the wrapped element is transformed again, so its own `v-once` goes
+      context.node = node = extend({}, node, {
+        props: node.props.filter(
+          prop => prop.type !== NodeTypes.DIRECTIVE || prop.name !== 'once',
+        ),
+      })
+    }
+
+    const comments = context.comment
+    if (comments.length) {
+      // #3619 ignore comments if the v-if is direct child of <transition>
+      if (__DEV__ && !isInTransition(context)) {
+        node = wrapTemplate(node, ['else-if', 'else'])
+        context.node = node = extend({}, node, {
+          children: [...comments, ...node.children],
+        })
+      }
+      comments.length = 0
+    }
+
+    const [branch, onExit] = createIfBranch(node, context)
+
+    let negative: BlockIRNode | IfIRNode
+    if (dir.name === 'else') {
+      negative = branch
+    } else {
+      negative = parent.ifTail = {
+        type: IRNodeTypes.IF,
+        id: -1,
+        condition: dir.exp!,
+        positive: branch,
+        index: context.root.nextIfIndex(),
+        blockShape: VaporBlockShape.EMPTY,
+        once:
+          context.inVOnce ||
+          isStaticExpression(dir.exp!, context.options.bindingMetadata),
+      }
+    }
+    lastIfNode.negative = negative
+
+    return () => {
+      onExit()
+      if (negative.type === IRNodeTypes.IF) {
+        negative.blockShape = encodeIfBlockShape(
+          negative.positive,
+          undefined,
+          allowNoScope,
+        )
+      }
+      lastIfNode.blockShape = encodeIfBlockShape(
+        lastIfNode.positive,
+        negative,
+        allowNoScope,
+      )
+    }
+  }
+}
+
+export function createIfBranch(
+  node: ElementNode,
+  context: TransformContext<ElementNode>,
+): [BlockIRNode, () => void] {
+  context.node = node = wrapTemplate(node, ['if', 'else-if', 'else'])
+
+  const branch: BlockIRNode = newBlock(node)
+  const exitBlock = context.enterBlock(branch)
+  context.reference()
+  return [branch, exitBlock]
+}
+
+function encodeIfBlockShape(
+  positive: BlockIRNode,
+  negative?: BlockIRNode | IfIRNode,
+  allowNoScope: boolean = true,
+): number {
+  // Pack the true/false branch shapes into one integer so runtime `createIf()`
+  // can decode the selected branch with a single bit-mask operation.
+  const positiveNoScope = allowNoScope && canSkipIfBranchScope(positive)
+  const negativeNoScope =
+    allowNoScope &&
+    negative &&
+    negative.type !== IRNodeTypes.IF &&
+    canSkipIfBranchScope(negative)
+
+  return (
+    getBlockShape(positive) |
+    (getNegativeIfBranchShape(negative) << 2) |
+    (positiveNoScope ? VaporIfFlags.TRUE_NO_SCOPE : 0) |
+    (negativeNoScope ? VaporIfFlags.FALSE_NO_SCOPE : 0)
+  )
+}
+
+function getNegativeIfBranchShape(
+  negative?: BlockIRNode | IfIRNode,
+): VaporBlockShape {
+  if (!negative) return VaporBlockShape.EMPTY
+  return negative.type === IRNodeTypes.IF
+    ? VaporBlockShape.ELSE_IF
+    : getBlockShape(negative)
+}
+
+function canSkipIfBranchScope(block: BlockIRNode): boolean {
+  if (block.effect.length || block.operation.length) {
+    return false
+  }
+  if (!isStaticBranch(block.node)) {
+    return false
+  }
+
+  if (
+    block.returns.length === 0 ||
+    block.dynamic.children.length !== block.returns.length
+  ) {
+    return false
+  }
+
+  return block.returns.every(id => {
+    const returned = findReturnedDynamic(block, id)
+    return !!(
+      returned &&
+      returned.template != null &&
+      !returned.operation &&
+      !returned.hasDynamicChild &&
+      !(returned.flags & (DynamicFlag.INSERT | DynamicFlag.NON_TEMPLATE))
+    )
+  })
+}
+
+function findReturnedDynamic(
+  block: BlockIRNode,
+  id: number,
+): IRDynamicInfo | undefined {
+  return block.dynamic.children.find(child => child.id === id)
+}
+
+function isStaticBranch(node: BlockIRNode['node']): boolean {
+  if (
+    node.type !== NodeTypes.ELEMENT ||
+    node.tagType !== ElementTypes.TEMPLATE ||
+    node.children.length === 0
+  ) {
+    return false
+  }
+  return node.children.every(child => isStaticTemplateNode(child))
+}
+
+function isStaticTemplateNode(node: TemplateChildNode): boolean {
+  if (node.type === NodeTypes.TEXT || node.type === NodeTypes.COMMENT) {
+    return true
+  }
+  if (
+    node.type !== NodeTypes.ELEMENT ||
+    node.tagType !== ElementTypes.ELEMENT
+  ) {
+    return false
+  }
+  for (const prop of node.props) {
+    if (prop.type === NodeTypes.DIRECTIVE || prop.name === 'ref') {
+      return false
+    }
+  }
+  return node.children.every(child => isStaticTemplateNode(child))
+}
+
+function checkSameKey(
+  node: ElementNode,
+  context: TransformContext<ElementNode>,
+): void {
+  const key = findProp(node, 'key')
+  const parent = context.parent
+  if (!key || !parent) return
+
+  // The v-if chain is still intact in the AST: `wrapTemplate` copies nodes
+  // instead of replacing them in the parent, so walk back over the preceding
+  // branches and compare their keys with this one.
+  const siblings = parent.node.children
+  let i = siblings.indexOf(node)
+  while (i > 0) {
+    const sibling = siblings[--i]
+    if (isCommentOrWhitespace(sibling)) continue
+    if (sibling.type !== NodeTypes.ELEMENT) return
+    const dir = sibling.props.find(
+      prop =>
+        prop.type === NodeTypes.DIRECTIVE &&
+        (prop.name === 'if' || prop.name === 'else-if'),
+    ) as DirectiveNode | undefined
+    if (!dir) return
+    if (isSameKey(findProp(sibling, 'key'), key)) {
+      context.options.onError(
+        createCompilerError(ErrorCodes.X_V_IF_SAME_KEY, key.loc),
+      )
+    }
+    if (dir.name === 'if') return
+  }
+}
+
+function isSameKey(
+  a: AttributeNode | DirectiveNode | undefined,
+  b: AttributeNode | DirectiveNode,
+): boolean {
+  if (!a || a.type !== b.type) {
+    return false
+  }
+  if (a.type === NodeTypes.ATTRIBUTE) {
+    if (a.value!.content !== (b as AttributeNode).value!.content) {
+      return false
+    }
+  } else {
+    // directive
+    const exp = a.exp!
+    const branchExp = (b as DirectiveNode).exp!
+    if (exp.type !== branchExp.type) {
+      return false
+    }
+    if (
+      exp.type !== NodeTypes.SIMPLE_EXPRESSION ||
+      exp.isStatic !== (branchExp as SimpleExpressionNode).isStatic ||
+      exp.content !== (branchExp as SimpleExpressionNode).content
+    ) {
+      return false
+    }
+  }
+  return true
+}

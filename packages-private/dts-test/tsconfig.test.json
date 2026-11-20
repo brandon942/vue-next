@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "noEmit": true,
+    "jsx": "preserve",
+    "module": "esnext",
+    "strict": true,
+    "moduleResolution": "bundler",
+    "lib": ["esnext", "dom"],
+    "types": ["vue/jsx"]
+  },
+  "include": ["./*"]
+}
