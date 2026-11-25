@@ -11,7 +11,7 @@ import {
   toRaw,
 } from './reactive'
 import { arrayInstrumentations } from './arrayInstrumentations'
-import { ReactiveFlags, TrackOpTypes, TriggerOpTypes } from './constants'
+import { ReactiveObjectFlags, TrackOpTypes, TriggerOpTypes } from './constants'
 import {
   ITERATE_KEY,
   track_reactiveObjectProperty,
@@ -57,17 +57,18 @@ class BaseReactiveHandler implements ProxyHandler<Target> {
   ) {}
 
   get(target: Target, key: string | symbol, receiver: object): any {
-    if (key === ReactiveFlags.SKIP) return target[ReactiveFlags.SKIP]
+    if (key === ReactiveObjectFlags.SKIP)
+      return target[ReactiveObjectFlags.SKIP]
 
     const isReadonly = this._isReadonly,
       isShallow = this._isShallow
-    if (key === ReactiveFlags.IS_REACTIVE) {
+    if (key === ReactiveObjectFlags.IS_REACTIVE) {
       return !isReadonly
-    } else if (key === ReactiveFlags.IS_READONLY) {
+    } else if (key === ReactiveObjectFlags.IS_READONLY) {
       return isReadonly
-    } else if (key === ReactiveFlags.IS_SHALLOW) {
+    } else if (key === ReactiveObjectFlags.IS_SHALLOW) {
       return isShallow
-    } else if (key === ReactiveFlags.RAW) {
+    } else if (key === ReactiveObjectFlags.RAW) {
       if (
         receiver ===
           (isReadonly
@@ -119,7 +120,7 @@ class BaseReactiveHandler implements ProxyHandler<Target> {
     }
 
     if (!isReadonly) {
-      track_reactiveObjectProperty(target, TrackOpTypes.GET, key)
+      track_reactiveObjectProperty(target, TrackOpTypes.GET, key, receiver)
     }
 
     if (isShallow) {

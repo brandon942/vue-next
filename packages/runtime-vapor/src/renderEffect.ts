@@ -47,7 +47,8 @@ export class RenderEffect extends ReactiveEffect {
   flags: number =
     ReactiveFlags2.IsEffect |
     ReactiveFlags2.Dirty |
-    EffectFlags.verifyThatDepsHaveChanged
+    EffectFlags.verifyThatDepsHaveChanged |
+    EffectFlags.TriggerSynchronously
   updateJob?: SchedulerJob
   render: () => void
   // Creation order within the owning component.

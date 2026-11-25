@@ -2,57 +2,54 @@ import { isArray, isIntegerKey, isMap, isSymbol } from '@vue/shared'
 import { TrackOpTypes, TriggerOpTypes } from './constants'
 import { endTrigger, onTrack, startTrigger } from './debug'
 import {
-	type Link,
-	ReactiveFlags,
-	type ReactiveNode,
-	activeSub,
-	batchDepth,
-	endBatch,
-	flush,
-	link,
-	notifySubs,
-	startBatch,
+  type Link,
+  ReactiveFlags,
+  type ReactiveNode,
+  activeSub,
+  batchDepth,
+  endBatch,
+  flush,
+  link,
+  notifySubs,
+  startBatch,
 } from './system'
-import {
-	EffectFlags,
-	type SubscriberAsync,
-} from './effect'
+import { EffectFlags, type SubscriberAsync } from './effect'
 import { getSubs } from './testHelpers'
 
 if (__TEST__) {
-	var depId = 0
+  var depId = 0
 }
 
 export class Dep implements ReactiveNode {
-	_subs: Link | undefined = undefined
-	subsTail: Link | undefined = undefined
-	flags: ReactiveFlags = ReactiveFlags.None
-	activeSubLink?: Link = undefined
+  _subs: Link | undefined = undefined
+  subsTail: Link | undefined = undefined
+  flags: ReactiveFlags = ReactiveFlags.None
+  activeSubLink?: Link = undefined
 
-	// a standalone dep has no map to leave once nothing subscribes it
-	constructor(
-		private map?: KeyToDepMap | undefined,
-		private key?: unknown,
-	) {
-		if (__TEST__) {
-			// @ts-expect-error
-			this.DepID = ++depId
+  // a standalone dep has no map to leave once nothing subscribes it
+  constructor(
+    private map?: KeyToDepMap | undefined,
+    public readonly key?: unknown,
+  ) {
+    if (__TEST__) {
+      // @ts-expect-error
+      this.DepID = ++depId
 
-			// @ts-ignore
-			this.getSubs = getSubs
-		}
-	}
+      // @ts-ignore
+      this.getSubs = getSubs
+    }
+  }
 
-	get subs(): Link | undefined {
-		return this._subs
-	}
+  get subs(): Link | undefined {
+    return this._subs
+  }
 
-	set subs(value: Link | undefined) {
-		this._subs = value
-		if (value === undefined && this.map) {
-			this.map.delete(this.key)
-		}
-	}
+  set subs(value: Link | undefined) {
+    this._subs = value
+    if (value === undefined) {
+      this.map?.delete(this.key)
+    }
+  }
 }
 
 /**
@@ -60,47 +57,47 @@ export class Dep implements ReactiveNode {
  * @internal
  */
 export function trackDep(
-	dep: ReactiveNode,
-	target: object = dep,
-	key: unknown = 'value',
+  dep: ReactiveNode,
+  target: object = dep,
+  key: unknown = 'value',
 ): void {
-	if (activeSub !== undefined) {
-		if (__DEV__) {
-			onTrack(activeSub, { target, type: TrackOpTypes.GET, key })
-		}
-		link(dep, activeSub)
-	}
+  if (activeSub !== undefined) {
+    if (__DEV__) {
+      onTrack(activeSub, { target, type: TrackOpTypes.GET, key })
+    }
+    link(dep, activeSub)
+  }
 }
 
 /**
  * @internal
  */
 export function triggerDep(
-	dep: ReactiveNode,
-	target: object = dep,
-	key: unknown = 'value',
-	newValue?: unknown,
-	oldValue?: unknown,
+  dep: ReactiveNode,
+  target: object = dep,
+  key: unknown = 'value',
+  newValue?: unknown,
+  oldValue?: unknown,
 ): void {
-	const subs = dep.subs
-	if (subs !== undefined) {
-		if (__DEV__) {
-			startTrigger()
-		}
-		notifySubs(subs, true)
-		if (__DEV__) {
-			endTrigger({
-				target,
-				type: TriggerOpTypes.SET,
-				key,
-				newValue,
-				oldValue,
-			})
-		}
-		if (!batchDepth) {
-			flush()
-		}
-	}
+  const subs = dep.subs
+  if (subs !== undefined) {
+    if (__DEV__) {
+      startTrigger()
+    }
+    notifySubs(subs, true)
+    if (__DEV__) {
+      endTrigger({
+        target,
+        type: TriggerOpTypes.SET,
+        key,
+        newValue,
+        oldValue,
+      })
+    }
+    if (!batchDepth) {
+      flush()
+    }
+  }
 }
 
 // The main WeakMap that stores {target -> key -> dep} connections.
@@ -112,13 +109,13 @@ type KeyToDepMap = Map<any, Dep>
 export const targetMap: WeakMap<object, KeyToDepMap> = new WeakMap()
 
 export const ITERATE_KEY: unique symbol = Symbol(
-	__DEV__ ? 'Object iterate' : '',
+  __DEV__ ? 'Object iterate' : '',
 )
 export const MAP_KEY_ITERATE_KEY: unique symbol = Symbol(
-	__DEV__ ? 'Map keys iterate' : '',
+  __DEV__ ? 'Map keys iterate' : '',
 )
 export const ARRAY_ITERATE_KEY: unique symbol = Symbol(
-	__DEV__ ? 'Array iterate' : '',
+  __DEV__ ? 'Array iterate' : '',
 )
 
 /**
@@ -132,35 +129,40 @@ export const ARRAY_ITERATE_KEY: unique symbol = Symbol(
  * @param key - Identifier of the reactive property to track.
  */
 export function track_reactiveObjectProperty(
-	target: object,
-	type: TrackOpTypes,
-	key: unknown,
+  target: object,
+  type: TrackOpTypes,
+  key: unknown,
+  receiver?: Object,
 ): void {
-	if (activeSub !== undefined) {
-		let depsMap = targetMap.get(target)
-		if (!depsMap) {
-			targetMap.set(target, (depsMap = new Map()))
-		}
-		let dep = depsMap.get(key)
-		if (!dep) {
-			depsMap.set(key, (dep = new Dep(depsMap, key)))
-		}
+  if (activeSub !== undefined) {
+    let depsMap = targetMap.get(target)
+    if (!depsMap) {
+      targetMap.set(target, (depsMap = new Map()))
+    }
+    let dep = depsMap.get(key)
+    if (!dep) {
+      depsMap.set(key, (dep = new Dep(depsMap, key)))
+    }
 
-		if (activeSub.flags & EffectFlags.ASYNC) {
-			let toTrack = (activeSub as SubscriberAsync).track(dep)
-			if (!toTrack) return
-		} else {
-			link(dep, activeSub!)
-		}
+    if (activeSub.flags & EffectFlags.ASYNC) {
+      let toTrack = (activeSub as SubscriberAsync).track(
+        dep,
+        undefined,
+        receiver,
+      )
+      if (!toTrack) return
+    } else {
+      link(dep, activeSub!)
+    }
 
-		if (__DEV__) {
-			onTrack(activeSub!, {
-				target,
-				type,
-				key,
-			})
-		}
-	}
+    if (__DEV__) {
+      onTrack(activeSub!, {
+        target,
+        type,
+        key,
+      })
+    }
+  }
 }
 
 /**
@@ -172,106 +174,106 @@ export function track_reactiveObjectProperty(
  * @param key - Can be used to target a specific reactive property in the target object.
  */
 export function trigger_reactiveObjectProperty(
-	target: object,
-	type: TriggerOpTypes,
-	key?: unknown,
-	newValue?: unknown,
-	oldValue?: unknown,
-	oldTarget?: Map<unknown, unknown> | Set<unknown>,
+  target: object,
+  type: TriggerOpTypes,
+  key?: unknown,
+  newValue?: unknown,
+  oldValue?: unknown,
+  oldTarget?: Map<unknown, unknown> | Set<unknown>,
 ): void {
-	const depsMap = targetMap.get(target)
-	if (!depsMap) {
-		// never been tracked
-		return
-	}
+  const depsMap = targetMap.get(target)
+  if (!depsMap) {
+    // never been tracked
+    return
+  }
 
-	const notifyAndDirty = (dep: ReactiveNode | undefined) => {
-		if (dep !== undefined && dep.subs !== undefined) {
-			notifySubs(dep.subs, true)
-		}
-	}
+  const notifyAndDirty = (dep: ReactiveNode | undefined) => {
+    if (dep !== undefined && dep.subs !== undefined) {
+      notifySubs(dep.subs, true)
+    }
+  }
 
-	startBatch()
-	if (__DEV__) {
-		startTrigger()
-	}
+  startBatch()
+  if (__DEV__) {
+    startTrigger()
+  }
 
-	if (type === TriggerOpTypes.CLEAR) {
-		// collection being cleared
-		// trigger all effects for target
-		depsMap.forEach(notifyAndDirty)
-	} else {
-		const targetIsArray = isArray(target)
-		const isArrayIndex = targetIsArray && isIntegerKey(key)
+  if (type === TriggerOpTypes.CLEAR) {
+    // collection being cleared
+    // trigger all effects for target
+    depsMap.forEach(notifyAndDirty)
+  } else {
+    const targetIsArray = isArray(target)
+    const isArrayIndex = targetIsArray && isIntegerKey(key)
 
-		if (targetIsArray && key === 'length') {
-			const newLength = Number(newValue)
-			depsMap.forEach((dep, key) => {
-				if (
-					key === 'length' ||
-					key === ARRAY_ITERATE_KEY ||
-					(!isSymbol(key) && key >= newLength)
-				) {
-					notifyAndDirty(dep)
-				}
-			})
-		} else {
-			// schedule runs for SET | ADD | DELETE
-			if (key !== void 0 || depsMap.has(void 0)) {
-				notifyAndDirty(depsMap.get(key))
-			}
+    if (targetIsArray && key === 'length') {
+      const newLength = Number(newValue)
+      depsMap.forEach((dep, key) => {
+        if (
+          key === 'length' ||
+          key === ARRAY_ITERATE_KEY ||
+          (!isSymbol(key) && key >= newLength)
+        ) {
+          notifyAndDirty(dep)
+        }
+      })
+    } else {
+      // schedule runs for SET | ADD | DELETE
+      if (key !== void 0 || depsMap.has(void 0)) {
+        notifyAndDirty(depsMap.get(key))
+      }
 
-			// schedule ARRAY_ITERATE for any numeric key change (length is handled above)
-			if (isArrayIndex) {
-				notifyAndDirty(depsMap.get(ARRAY_ITERATE_KEY))
-			}
+      // schedule ARRAY_ITERATE for any numeric key change (length is handled above)
+      if (isArrayIndex) {
+        notifyAndDirty(depsMap.get(ARRAY_ITERATE_KEY))
+      }
 
-			// also run for iteration key on ADD | DELETE | Map.SET
-			switch (type) {
-				case TriggerOpTypes.ADD:
-					if (!targetIsArray) {
-						notifyAndDirty(depsMap.get(ITERATE_KEY))
-						if (isMap(target)) {
-							notifyAndDirty(depsMap.get(MAP_KEY_ITERATE_KEY))
-						}
-					} else if (isArrayIndex) {
-						// new index added to array -> length changes
-						notifyAndDirty(depsMap.get('length'))
-					}
-					break
-				case TriggerOpTypes.DELETE:
-					if (!targetIsArray) {
-						notifyAndDirty(depsMap.get(ITERATE_KEY))
-						if (isMap(target)) {
-							notifyAndDirty(depsMap.get(MAP_KEY_ITERATE_KEY))
-						}
-					}
-					break
-				case TriggerOpTypes.SET:
-					if (isMap(target)) {
-						notifyAndDirty(depsMap.get(ITERATE_KEY))
-					}
-					break
-			}
-		}
-	}
-	if (__DEV__) {
-		endTrigger({
-			target,
-			type,
-			key,
-			newValue,
-			oldValue,
-			oldTarget,
-		})
-	}
-	endBatch()
+      // also run for iteration key on ADD | DELETE | Map.SET
+      switch (type) {
+        case TriggerOpTypes.ADD:
+          if (!targetIsArray) {
+            notifyAndDirty(depsMap.get(ITERATE_KEY))
+            if (isMap(target)) {
+              notifyAndDirty(depsMap.get(MAP_KEY_ITERATE_KEY))
+            }
+          } else if (isArrayIndex) {
+            // new index added to array -> length changes
+            notifyAndDirty(depsMap.get('length'))
+          }
+          break
+        case TriggerOpTypes.DELETE:
+          if (!targetIsArray) {
+            notifyAndDirty(depsMap.get(ITERATE_KEY))
+            if (isMap(target)) {
+              notifyAndDirty(depsMap.get(MAP_KEY_ITERATE_KEY))
+            }
+          }
+          break
+        case TriggerOpTypes.SET:
+          if (isMap(target)) {
+            notifyAndDirty(depsMap.get(ITERATE_KEY))
+          }
+          break
+      }
+    }
+  }
+  if (__DEV__) {
+    endTrigger({
+      target,
+      type,
+      key,
+      newValue,
+      oldValue,
+      oldTarget,
+    })
+  }
+  endBatch()
 }
 
 export function getDepFromReactive(
-	object: any,
-	key: string | number | symbol,
+  object: any,
+  key: string | number | symbol,
 ): ReactiveNode | undefined {
-	const depMap = targetMap.get(object)
-	return depMap && depMap.get(key)
+  const depMap = targetMap.get(object)
+  return depMap && depMap.get(key)
 }

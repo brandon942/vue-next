@@ -14,7 +14,12 @@ import {
   trackDep,
   triggerDep,
 } from '../src/dep'
-import { onEffectCleanup, pauseTracking, resetTracking } from '../src/effect'
+import {
+  EffectFlags,
+  onEffectCleanup,
+  pauseTracking,
+  resetTracking,
+} from '../src/effect'
 import {
   type DebuggerEvent,
   type ReactiveEffectRunner,
@@ -2012,5 +2017,46 @@ describe('reactivity/effect', () => {
 
     source.value++
     expect(calls).toEqual(['run'])
+  })
+
+  test('asynchronously triggering effects', async () => {
+    const val = ref(1)
+    var val2 = 0
+    let runner = effect(
+      () => {
+        val2 = val.value
+      },
+      {
+        triggerSynchronously: 0,
+      },
+    )
+    expect(val2).toBe(1)
+    ++val.value
+    ++val.value
+    expect(val2).toBe(1)
+    await nextTick()
+    expect(val2).toBe(3)
+
+    runner.effect.flags |= EffectFlags.TriggerSynchronously
+    ++val.value
+    expect(val2).toBe(4)
+    runner.effect.stop()
+
+    val2 = 0
+    val.value = 1
+    runner = effect(
+      () => {
+        val2 = val.value
+      },
+      {
+        triggerSynchronously: 0,
+        deferInitialRun: 1,
+      },
+    )
+    expect(val2).toBe(0)
+    ++val.value
+    expect(val2).toBe(0)
+    await nextTick()
+    expect(val2).toBe(2)
   })
 })

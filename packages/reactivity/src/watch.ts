@@ -1,26 +1,26 @@
 import {
-	EMPTY_OBJ,
-	NOOP,
-	hasChanged,
-	isArray,
-	isFunction,
-	isMap,
-	isObject,
-	isPlainObject,
-	isSet,
+  EMPTY_OBJ,
+  NOOP,
+  hasChanged,
+  isArray,
+  isFunction,
+  isMap,
+  isObject,
+  isPlainObject,
+  isSet,
 } from '@vue/shared'
 import type { ComputedRef } from './computed'
-import { ReactiveFlags as ReactiveFlags2 } from './constants'
+import { ReactiveObjectFlags as ReactiveFlags2 } from './constants'
 import {
-	AsyncEffectFunction,
-	type DebuggerOptions,
-	EffectFlags,
-	EffectFlags_2,
-	ListedDependencies,
-	ReactiveEffect,
-	ReactiveEffectAsync,
-	ReactiveEffectNestableInterface,
-	cleanup,
+  AsyncEffectFunction,
+  type DebuggerOptions,
+  EffectFlags,
+  EffectFlags_2,
+  ListedDependencies,
+  ReactiveEffect,
+  ReactiveEffectAsync,
+  ReactiveEffectNestableInterface,
+  cleanup,
 } from './effect'
 import { isReactive, isShallow } from './reactive'
 import { type Ref, isRef } from './ref'
@@ -31,9 +31,9 @@ import { warn } from './warning'
 // to @vue/reactivity to allow co-location with the moved base watch logic, hence
 // it is essential to keep these values unchanged.
 export enum WatchErrorCodes {
-	WATCH_GETTER = 2,
-	WATCH_CALLBACK,
-	WATCH_CLEANUP,
+  WATCH_GETTER = 2,
+  WATCH_CALLBACK,
+  WATCH_CLEANUP,
 }
 
 export type WatchEffect = (onCleanup: OnCleanup) => void
@@ -41,34 +41,34 @@ export type WatchEffect = (onCleanup: OnCleanup) => void
 export type WatchSource<T = any> = Ref<T, any> | ComputedRef<T> | (() => T)
 
 export type WatchCallback<V = any, OV = any> = (
-	value: V,
-	oldValue: OV,
-	onCleanup: OnCleanup,
+  value: V,
+  oldValue: OV,
+  onCleanup: OnCleanup,
 ) => any
 
 export type OnCleanup = (cleanupFn: () => void) => void
 
 export interface WatchOptions<Immediate = boolean> extends DebuggerOptions {
-	immediate?: Immediate
-	deep?: boolean | number
-	once?: boolean
-	onWarn?: (msg: string, ...args: any[]) => void
-	/**
-	 * @internal
-	 */
-	call?: (
-		fn: Function | Function[],
-		type: WatchErrorCodes,
-		args?: unknown[],
-	) => void
+  immediate?: Immediate
+  deep?: boolean | number
+  once?: boolean
+  onWarn?: (msg: string, ...args: any[]) => void
+  /**
+   * @internal
+   */
+  call?: (
+    fn: Function | Function[],
+    type: WatchErrorCodes,
+    args?: unknown[],
+  ) => void
 }
 
 export type WatchStopHandle = () => void
 
 export interface WatchHandle extends WatchStopHandle {
-	pause: () => void
-	resume: () => void
-	stop: () => void
+  pause: () => void
+  resume: () => void
+  stop: () => void
 }
 
 // initial value for watchers to trigger on undefined initial values
@@ -80,10 +80,10 @@ let activeWatcher: WatcherEffect | undefined = undefined
  * Returns the current active effect if there is one.
  */
 export function getCurrentWatcher():
-	| ReactiveEffect<any>
-	| ReactiveEffectAsync
-	| undefined {
-	return activeWatcher
+  | ReactiveEffect<any>
+  | ReactiveEffectAsync
+  | undefined {
+  return activeWatcher
 }
 
 /**
@@ -98,499 +98,500 @@ export function getCurrentWatcher():
  * By default, the current active effect.
  */
 export function onWatcherCleanup(
-	cleanupFn: () => void,
-	failSilently = false,
-	owner: typeof activeWatcher = activeWatcher,
+  cleanupFn: () => void,
+  failSilently = false,
+  owner: typeof activeWatcher = activeWatcher,
 ): void {
-	if (owner && owner instanceof WatcherEffect) {
-		const { call } = owner.options
-		const cleanup = call
-			? () => call(cleanupFn, WatchErrorCodes.WATCH_CLEANUP)
-			: cleanupFn
-		if (owner.cb) {
-			; (owner.cbCleanups || (owner.cbCleanups = [])).push(cleanup)
-		} else {
-			owner.cleanups[owner.cleanupsLength++] = cleanup
-		}
-	} else if (__DEV__ && !failSilently) {
-		warn(
-			`onWatcherCleanup() was called when there was no active watcher` +
-			` to associate with.`,
-		)
-	}
+  if (owner && owner instanceof WatcherEffect) {
+    const { call } = owner.options
+    const cleanup = call
+      ? () => call(cleanupFn, WatchErrorCodes.WATCH_CLEANUP)
+      : cleanupFn
+    if (owner.cb) {
+      ;(owner.cbCleanups || (owner.cbCleanups = [])).push(cleanup)
+    } else {
+      ;(owner.cleanups ??= [])[owner.cleanupsLength++] = cleanup
+    }
+  } else if (__DEV__ && !failSilently) {
+    warn(
+      `onWatcherCleanup() was called when there was no active watcher` +
+        ` to associate with.`,
+    )
+  }
 }
 
 export class WatcherEffect extends ReactiveEffect {
-	flags: number =
-		ReactiveFlags.IsEffect |
-		ReactiveFlags.Dirty |
-		EffectFlags.verifyThatDepsHaveChanged
-	forceTrigger: boolean
-	isMultiSource: boolean
-	oldValue: any
-	cbCleanups?: (() => void)[]
-	boundCleanup: typeof onWatcherCleanup = fn =>
-		onWatcherCleanup(fn, false, this)
+  flags: number =
+    ReactiveFlags.IsEffect |
+    ReactiveFlags.Dirty |
+    EffectFlags.verifyThatDepsHaveChanged |
+    EffectFlags.TriggerSynchronously
+  forceTrigger: boolean
+  isMultiSource: boolean
+  oldValue: any
+  cbCleanups?: (() => void)[]
+  boundCleanup: typeof onWatcherCleanup = fn =>
+    onWatcherCleanup(fn, false, this)
 
-	constructor(
-		source: WatchSource | WatchSource[] | WatchEffect | object,
-		public cb?: WatchCallback<any, any> | null | undefined,
-		public options: WatchOptions = EMPTY_OBJ,
-	) {
-		const { deep, once, call, onWarn } = options
+  constructor(
+    source: WatchSource | WatchSource[] | WatchEffect | object,
+    public cb?: WatchCallback<any, any> | null | undefined,
+    public options: WatchOptions = EMPTY_OBJ,
+  ) {
+    const { deep, once, call, onWarn } = options
 
-		let getter: () => any
-		let forceTrigger = false
-		let isMultiSource = false
+    let getter: () => any
+    let forceTrigger = false
+    let isMultiSource = false
 
-		if (isRef(source)) {
-			getter = () => source.value
-			forceTrigger = isShallow(source)
-		} else if (isReactive(source)) {
-			getter = () => reactiveGetter(source, deep)
-			forceTrigger = true
-		} else if (isArray(source)) {
-			isMultiSource = true
-			forceTrigger = source.some(s => isReactive(s) || isShallow(s))
-			getter = () =>
-				source.map(s => {
-					if (isRef(s)) {
-						return s.value
-					} else if (isReactive(s)) {
-						return reactiveGetter(s, deep)
-					} else if (isFunction(s)) {
-						return call ? call(s, WatchErrorCodes.WATCH_GETTER) : s()
-					} else {
-						__DEV__ && warnInvalidSource(s, onWarn)
-					}
-				})
-		} else if (isFunction(source)) {
-			if (cb) {
-				// getter with cb
-				getter = call
-					? () => call(source, WatchErrorCodes.WATCH_GETTER)
-					: (source as () => any)
-			} else {
-				// no cb -> simple effect
-				getter = () => {
-					if (this.cleanupsLength) {
-						const prevSub = setActiveSub()
-						try {
-							cleanup(this)
-						} finally {
-							setActiveSub(prevSub)
-						}
-					}
-					const currentEffect = activeWatcher
-					activeWatcher = this
-					try {
-						return call
-							? call(source, WatchErrorCodes.WATCH_CALLBACK, [
-								this.boundCleanup,
-							])
-							: source(this.boundCleanup)
-					} finally {
-						activeWatcher = currentEffect
-					}
-				}
-			}
-		} else {
-			getter = NOOP
-			__DEV__ && warnInvalidSource(source, onWarn)
-		}
+    if (isRef(source)) {
+      getter = () => source.value
+      forceTrigger = isShallow(source)
+    } else if (isReactive(source)) {
+      getter = () => reactiveGetter(source, deep)
+      forceTrigger = true
+    } else if (isArray(source)) {
+      isMultiSource = true
+      forceTrigger = source.some(s => isReactive(s) || isShallow(s))
+      getter = () =>
+        source.map(s => {
+          if (isRef(s)) {
+            return s.value
+          } else if (isReactive(s)) {
+            return reactiveGetter(s, deep)
+          } else if (isFunction(s)) {
+            return call ? call(s, WatchErrorCodes.WATCH_GETTER) : s()
+          } else {
+            __DEV__ && warnInvalidSource(s, onWarn)
+          }
+        })
+    } else if (isFunction(source)) {
+      if (cb) {
+        // getter with cb
+        getter = call
+          ? () => call(source, WatchErrorCodes.WATCH_GETTER)
+          : (source as () => any)
+      } else {
+        // no cb -> simple effect
+        getter = () => {
+          if (this.cleanupsLength) {
+            const prevSub = setActiveSub()
+            try {
+              cleanup(this)
+            } finally {
+              setActiveSub(prevSub)
+            }
+          }
+          const currentEffect = activeWatcher
+          activeWatcher = this
+          try {
+            return call
+              ? call(source, WatchErrorCodes.WATCH_CALLBACK, [
+                  this.boundCleanup,
+                ])
+              : source(this.boundCleanup)
+          } finally {
+            activeWatcher = currentEffect
+          }
+        }
+      }
+    } else {
+      getter = NOOP
+      __DEV__ && warnInvalidSource(source, onWarn)
+    }
 
-		if (cb && deep) {
-			const baseGetter = getter
-			const depth = deep === true ? Infinity : deep
-			getter = () => traverse(baseGetter(), depth)
-		}
+    if (cb && deep) {
+      const baseGetter = getter
+      const depth = deep === true ? Infinity : deep
+      getter = () => traverse(baseGetter(), depth)
+    }
 
-		super(getter)
-		this.forceTrigger = forceTrigger
-		this.isMultiSource = isMultiSource
+    super(getter)
+    this.forceTrigger = forceTrigger
+    this.isMultiSource = isMultiSource
 
-		if (once && cb) {
-			const _cb = cb
-			cb = (...args) => {
-				try {
-					return _cb(...args)
-				} finally {
-					this.stop()
-				}
-			}
-		}
+    if (once && cb) {
+      const _cb = cb
+      cb = (...args) => {
+        try {
+          return _cb(...args)
+        } finally {
+          this.stop()
+        }
+      }
+    }
 
-		this.cb = cb
+    this.cb = cb
 
-		this.oldValue = isMultiSource
-			? new Array((source as []).length).fill(INITIAL_WATCHER_VALUE)
-			: INITIAL_WATCHER_VALUE
+    this.oldValue = isMultiSource
+      ? new Array((source as []).length).fill(INITIAL_WATCHER_VALUE)
+      : INITIAL_WATCHER_VALUE
 
-		if (__DEV__) {
-			this.onTrack = options.onTrack
-			this.onTrigger = options.onTrigger
-		}
-	}
+    if (__DEV__) {
+      this.onTrack = options.onTrack
+      this.onTrigger = options.onTrigger
+    }
+  }
 
-	cleanupCallback(): void {
-		const cleanups = this.cbCleanups
-		if (cleanups) {
-			// Cleanups may synchronously trigger the watcher again.
-			this.cbCleanups = undefined
-			for (let i = 0, l = cleanups.length; i < l; i++) {
-				cleanups[i]()
-			}
-		}
-	}
+  cleanupCallback(): void {
+    const cleanups = this.cbCleanups
+    if (cleanups) {
+      // Cleanups may synchronously trigger the watcher again.
+      this.cbCleanups = undefined
+      for (let i = 0, l = cleanups.length; i < l; i++) {
+        cleanups[i]()
+      }
+    }
+  }
 
-	stop(): void {
-		if (this.active) {
-			super.stop()
-			this.cleanupCallback()
-		}
-	}
+  stop(): void {
+    if (this.active) {
+      super.stop()
+      this.cleanupCallback()
+    }
+  }
 
-	run(initialRun = false): void {
-		const oldValue = this.oldValue
-		const newValue = (this.oldValue = super.run())
-		if (!this.cb) {
-			return
-		}
-		const { immediate, deep, call } = this.options
-		if (initialRun && !immediate) {
-			return
-		}
-		if (
-			initialRun ||
-			deep ||
-			this.forceTrigger ||
-			(this.isMultiSource
-				? (newValue as any[]).some((v, i) => hasChanged(v, oldValue[i]))
-				: hasChanged(newValue, oldValue))
-		) {
-			const currentWatcher = activeWatcher
-			const prevSub = setActiveSub()
-			try {
-				// cleanup before running cb again
-				this.cleanupCallback()
-				activeWatcher = this
-				const args = [
-					newValue,
-					// pass undefined as the old value when it's changed for the first time
-					oldValue === INITIAL_WATCHER_VALUE
-						? undefined
-						: this.isMultiSource && oldValue[0] === INITIAL_WATCHER_VALUE
-							? []
-							: oldValue,
-					this.boundCleanup,
-				]
-				call
-					? call(this.cb, WatchErrorCodes.WATCH_CALLBACK, args)
-					: // @ts-expect-error
-					this.cb(...args)
-			} finally {
-				activeWatcher = currentWatcher
-				setActiveSub(prevSub)
-			}
-		}
-	}
+  run(initialRun = false): void {
+    const oldValue = this.oldValue
+    const newValue = (this.oldValue = super.run())
+    if (!this.cb) {
+      return
+    }
+    const { immediate, deep, call } = this.options
+    if (initialRun && !immediate) {
+      return
+    }
+    if (
+      initialRun ||
+      deep ||
+      this.forceTrigger ||
+      (this.isMultiSource
+        ? (newValue as any[]).some((v, i) => hasChanged(v, oldValue[i]))
+        : hasChanged(newValue, oldValue))
+    ) {
+      const currentWatcher = activeWatcher
+      const prevSub = setActiveSub()
+      try {
+        // cleanup before running cb again
+        this.cleanupCallback()
+        activeWatcher = this
+        const args = [
+          newValue,
+          // pass undefined as the old value when it's changed for the first time
+          oldValue === INITIAL_WATCHER_VALUE
+            ? undefined
+            : this.isMultiSource && oldValue[0] === INITIAL_WATCHER_VALUE
+              ? []
+              : oldValue,
+          this.boundCleanup,
+        ]
+        call
+          ? call(this.cb, WatchErrorCodes.WATCH_CALLBACK, args)
+          : // @ts-expect-error
+            this.cb(...args)
+      } finally {
+        activeWatcher = currentWatcher
+        setActiveSub(prevSub)
+      }
+    }
+  }
 }
 
 function reactiveGetter(source: object, deep: WatchOptions['deep']): unknown {
-	// traverse will happen in wrapped getter below
-	if (deep) return source
-	// for `deep: false | 0` or shallow reactive, only traverse root-level properties
-	if (isShallow(source) || deep === false || deep === 0)
-		return traverse(source, 1)
-	// for `deep: undefined` on a reactive object, deeply traverse all properties
-	return traverse(source)
+  // traverse will happen in wrapped getter below
+  if (deep) return source
+  // for `deep: false | 0` or shallow reactive, only traverse root-level properties
+  if (isShallow(source) || deep === false || deep === 0)
+    return traverse(source, 1)
+  // for `deep: undefined` on a reactive object, deeply traverse all properties
+  return traverse(source)
 }
 
 function warnInvalidSource(s: object, onWarn: WatchOptions['onWarn']): void {
-	; (onWarn || warn)(
-		`Invalid watch source: `,
-		s,
-		`A watch source can only be a getter/effect function, a ref, ` +
-		`a reactive object, or an array of these types.`,
-	)
+  ;(onWarn || warn)(
+    `Invalid watch source: `,
+    s,
+    `A watch source can only be a getter/effect function, a ref, ` +
+      `a reactive object, or an array of these types.`,
+  )
 }
 
 export function watch(
-	source: WatchSource | WatchSource[] | WatchEffect | object,
-	cb?: WatchCallback | null,
-	options: WatchOptions = EMPTY_OBJ,
+  source: WatchSource | WatchSource[] | WatchEffect | object,
+  cb?: WatchCallback | null,
+  options: WatchOptions = EMPTY_OBJ,
 ): WatchHandle {
-	const effect = new WatcherEffect(source, cb, options)
+  const effect = new WatcherEffect(source, cb, options)
 
-	effect.run(true)
+  effect.run(true)
 
-	const stop = effect.stop.bind(effect) as WatchHandle
-	stop.pause = effect.pause.bind(effect)
-	stop.resume = effect.resume.bind(effect)
-	stop.stop = stop
+  const stop = effect.stop.bind(effect) as WatchHandle
+  stop.pause = effect.pause.bind(effect)
+  stop.resume = effect.resume.bind(effect)
+  stop.stop = stop
 
-	return stop
+  return stop
 }
 
 export function traverse(
-	value: unknown,
-	depth: number = Infinity,
-	seen?: Map<unknown, number>,
+  value: unknown,
+  depth: number = Infinity,
+  seen?: Map<unknown, number>,
 ): unknown {
-	if (depth <= 0 || !isObject(value) || (value as any)[ReactiveFlags2.SKIP]) {
-		return value
-	}
+  if (depth <= 0 || !isObject(value) || (value as any)[ReactiveFlags2.SKIP]) {
+    return value
+  }
 
-	seen = seen || new Map()
-	if ((seen.get(value) || 0) >= depth) {
-		return value
-	}
-	seen.set(value, depth)
-	depth--
-	if (isRef(value)) {
-		traverse(value.value, depth, seen)
-	} else if (isArray(value)) {
-		for (let i = 0; i < value.length; i++) {
-			traverse(value[i], depth, seen)
-		}
-	} else if (isSet(value) || isMap(value)) {
-		value.forEach((v: any) => {
-			traverse(v, depth, seen)
-		})
-	} else if (isPlainObject(value)) {
-		for (const key in value) {
-			traverse(value[key], depth, seen)
-		}
-		for (const key of Object.getOwnPropertySymbols(value)) {
-			if (Object.prototype.propertyIsEnumerable.call(value, key)) {
-				traverse(value[key as any], depth, seen)
-			}
-		}
-	}
-	return value
+  seen = seen || new Map()
+  if ((seen.get(value) || 0) >= depth) {
+    return value
+  }
+  seen.set(value, depth)
+  depth--
+  if (isRef(value)) {
+    traverse(value.value, depth, seen)
+  } else if (isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      traverse(value[i], depth, seen)
+    }
+  } else if (isSet(value) || isMap(value)) {
+    value.forEach((v: any) => {
+      traverse(v, depth, seen)
+    })
+  } else if (isPlainObject(value)) {
+    for (const key in value) {
+      traverse(value[key], depth, seen)
+    }
+    for (const key of Object.getOwnPropertySymbols(value)) {
+      if (Object.prototype.propertyIsEnumerable.call(value, key)) {
+        traverse(value[key as any], depth, seen)
+      }
+    }
+  }
+  return value
 }
 
 // WATCH ASYNC ------------------------------------------------------------------------------------------------------------------------
 export interface WatchEffectAsyncOptions extends WatchEffectAsyncOptionsLight {
-	toLiveTrack?: any
-	isReentrant?: any
-	toAbortOnPause?: any
-	toAbortOnDestuct?: any
-	toAbortOnRetrigger?: any
-	toTriggerSynchronously?: any
-	enableSkipping?: any
-	manualHandling?: any
+  toLiveTrack?: any
+  isReentrant?: any
+  toAbortOnPause?: any
+  toAbortOnDestuct?: any
+  toAbortOnRetrigger?: any
+  toTriggerSynchronously?: any
+  enableSkipping?: any
+  manualHandling?: any
 }
 export interface WatchEffectAsyncOptionsLight
-	extends DebuggerOptions, Omit<WatchOptions, 'immediate' | 'deep' | 'once'> {
-	flags?: number
-	whitelist?: ListedDependencies
-	blacklist?: ListedDependencies
-	maxConcurrentRuns?: number
-	abortOldRunOnUpdate?: any
-	runOnUpdate?: any | 'async'
-	isPersistentChildEffect?: any
-	toAbortIfNotCalledInParentEffect?: any
+  extends DebuggerOptions, Omit<WatchOptions, 'immediate' | 'deep' | 'once'> {
+  flags?: number
+  whitelist?: ListedDependencies
+  blacklist?: ListedDependencies
+  maxConcurrentRuns?: number
+  abortOldRunOnUpdate?: any
+  runOnUpdate?: any | 'async'
+  isPersistentChildEffect?: any
+  toAbortIfNotCalledInParentEffect?: any
 }
 
 export function watchEffectAsyncLight(
-	effectFunction: AsyncEffectFunction,
-	options?: WatchEffectAsyncOptions,
+  effectFunction: AsyncEffectFunction,
+  options?: WatchEffectAsyncOptions,
 ): ReactiveEffectAsync
 export function watchEffectAsyncLight(
-	effectId: string,
-	effectFunction: AsyncEffectFunction,
-	options?: WatchEffectAsyncOptions,
+  effectId: string,
+  effectFunction: AsyncEffectFunction,
+  options?: WatchEffectAsyncOptions,
 ): ReactiveEffectAsync
 export function watchEffectAsyncLight(
-	effectId: string | AsyncEffectFunction,
-	effectFunction?: AsyncEffectFunction | WatchEffectAsyncOptionsLight,
-	options?: WatchEffectAsyncOptions,
-	constructor?: any,
-	...additionalConstructorArgs: any[]
+  effectId: string | AsyncEffectFunction,
+  effectFunction?: AsyncEffectFunction | WatchEffectAsyncOptionsLight,
+  options?: WatchEffectAsyncOptions,
+  constructor?: any,
+  ...additionalConstructorArgs: any[]
 ): ReactiveEffectAsync {
-	if (typeof effectId === 'function') {
-		options = effectFunction as WatchEffectAsyncOptionsLight
-		effectFunction = effectId
-		effectId = undefined as any
-	}
-	if (options) {
-		const {
-			toLiveTrack,
-			isReentrant,
-			toAbortOnPause,
-			toAbortOnDestuct,
-			toAbortOnRetrigger,
-			toTriggerSynchronously,
-			enableSkipping,
-			manualHandling,
-			isPersistentChildEffect,
-			toAbortIfNotCalledInParentEffect,
-		} = options
-		let flags = options.flags ?? 0
-		if (toLiveTrack) flags |= EffectFlags.LIVETRACKING
-		if (isReentrant) flags |= EffectFlags.REENTRANT
-		if (toAbortOnPause) flags |= EffectFlags.AbortRunOnPause
-		if (toAbortOnDestuct) flags |= EffectFlags.AbortRunOnStop
-		if (toAbortOnRetrigger) flags |= EffectFlags.AbortRunOnRetrigger
-		if (enableSkipping) flags |= EffectFlags.EnabledSections
-		if (manualHandling) flags |= EffectFlags.ManualHandling
-		if (toTriggerSynchronously) flags |= EffectFlags.TriggerSynchronously
-		if (isPersistentChildEffect) flags |= EffectFlags.PersistentChildEffect
-		if (toAbortIfNotCalledInParentEffect) flags |= EffectFlags.AbortOnUnvisit
-		options.flags = flags
-	}
+  if (typeof effectId === 'function') {
+    options = effectFunction as WatchEffectAsyncOptionsLight
+    effectFunction = effectId
+    effectId = undefined as any
+  }
+  if (options) {
+    const {
+      toLiveTrack,
+      isReentrant,
+      toAbortOnPause,
+      toAbortOnDestuct,
+      toAbortOnRetrigger,
+      toTriggerSynchronously,
+      enableSkipping,
+      manualHandling,
+      isPersistentChildEffect,
+      toAbortIfNotCalledInParentEffect,
+    } = options
+    let flags = options.flags ?? 0
+    if (toLiveTrack) flags |= EffectFlags.LIVETRACKING
+    if (isReentrant) flags |= EffectFlags.REENTRANT
+    if (toAbortOnPause) flags |= EffectFlags.AbortRunOnPause
+    if (toAbortOnDestuct) flags |= EffectFlags.AbortRunOnStop
+    if (toAbortOnRetrigger) flags |= EffectFlags.AbortRunOnRetrigger
+    if (enableSkipping) flags |= EffectFlags.EnabledSections
+    if (manualHandling) flags |= EffectFlags.ManualHandling
+    if (toTriggerSynchronously) flags |= EffectFlags.TriggerSynchronously
+    if (isPersistentChildEffect) flags |= EffectFlags.PersistentChildEffect
+    if (toAbortIfNotCalledInParentEffect) flags |= EffectFlags.AbortOnUnvisit
+    options.flags = flags
+  }
 
-	return watchEffectAsyncLightest(
-		effectId as any,
-		effectFunction as any,
-		options,
-		constructor,
-		// @ts-ignore
-		...additionalConstructorArgs,
-	)
+  return watchEffectAsyncLightest(
+    effectId as any,
+    effectFunction as any,
+    options,
+    constructor,
+    // @ts-ignore
+    ...additionalConstructorArgs,
+  )
 }
 
 export function watchEffectAsyncLightest(
-	effectFunction: AsyncEffectFunction,
-	options?: WatchEffectAsyncOptionsLight,
+  effectFunction: AsyncEffectFunction,
+  options?: WatchEffectAsyncOptionsLight,
 ): ReactiveEffectAsync
 export function watchEffectAsyncLightest(
-	effectId: string,
-	effectFunction: AsyncEffectFunction,
-	options?: WatchEffectAsyncOptionsLight,
+  effectId: string,
+  effectFunction: AsyncEffectFunction,
+  options?: WatchEffectAsyncOptionsLight,
 ): ReactiveEffectAsync
 export function watchEffectAsyncLightest(
-	effectId: string | AsyncEffectFunction,
-	effectFunction?: AsyncEffectFunction | WatchEffectAsyncOptionsLight,
-	options?: WatchEffectAsyncOptionsLight,
-	constructor?: any,
-	...additionalConstructorArgs: any[]
+  effectId: string | AsyncEffectFunction,
+  effectFunction?: AsyncEffectFunction | WatchEffectAsyncOptionsLight,
+  options?: WatchEffectAsyncOptionsLight,
+  constructor?: any,
+  ...additionalConstructorArgs: any[]
 ): ReactiveEffectAsync {
-	if (typeof effectId === 'function') {
-		options = effectFunction as WatchEffectAsyncOptionsLight
-		effectFunction = effectId
-		effectId = undefined as any
-	}
+  if (typeof effectId === 'function') {
+    options = effectFunction as WatchEffectAsyncOptionsLight
+    effectFunction = effectId
+    effectId = undefined as any
+  }
 
-	if (options) {
-		var {
-			call,
-			blacklist,
-			whitelist,
-			maxConcurrentRuns,
-			flags = 0,
-			runOnUpdate = true,
-		} = options
-		if (call) {
-			let effectFunction_ = effectFunction
-			effectFunction = x =>
-				call!(effectFunction_ as Function, WatchErrorCodes.WATCH_CALLBACK, [x])
-		}
-	} else {
-		var flags = 0
-		var runOnUpdate: any = true
-	}
+  if (options) {
+    var {
+      call,
+      blacklist,
+      whitelist,
+      maxConcurrentRuns,
+      flags = 0,
+      runOnUpdate = true,
+    } = options
+    if (call) {
+      let effectFunction_ = effectFunction
+      effectFunction = x =>
+        call!(effectFunction_ as Function, WatchErrorCodes.WATCH_CALLBACK, [x])
+    }
+  } else {
+    var flags = 0
+    var runOnUpdate: any = true
+  }
 
-	let isChildEffect, toResume
-	let effect: ReactiveEffectAsync
-	if (activeSub) {
-		isChildEffect = true
-		if (!effectId) {
-			if (__DEV__) {
-				warn(`An effectId is recommended for nested effects`)
-			}
-		} else {
-			let childEffects = (activeSub as ReactiveEffectNestableInterface).children
-			if (childEffects) {
-				for (let i = 0; i < childEffects.length; i++) {
-					let effect_ = childEffects[i] as ReactiveEffectAsync
-					if (effect_.effectId === effectId) {
-						effect = effect_
-							; (activeSub as ReactiveEffectNestableInterface).addChild(effect)
-						effect.fn = effectFunction as AsyncEffectFunction
-						effect.flags2 &= ~EffectFlags_2.Unvisited
-						flags = effect.flags
-						toResume = flags & EffectFlags.PausedOnUnvisit
-						break
-					}
-				}
-			}
-		}
-	}
-	if (!effect!) {
-		if (constructor) {
-			effect = new constructor(
-				effectFunction as AsyncEffectFunction,
-				flags,
-				effectId as string,
-				isChildEffect,
-				...additionalConstructorArgs,
-			)
-		} else {
-			effect = new ReactiveEffectAsync(
-				effectFunction as AsyncEffectFunction,
-				flags,
-				effectId as string,
-				isChildEffect,
-			)
-		}
-		; (activeSub as ReactiveEffectNestableInterface)?.addChild(effect)
-	}
+  let isChildEffect, toResume
+  let effect: ReactiveEffectAsync
+  if (activeSub) {
+    isChildEffect = true
+    if (!effectId) {
+      if (__DEV__) {
+        warn(`An effectId is recommended for nested effects`)
+      }
+    } else {
+      let childEffects = (activeSub as ReactiveEffectNestableInterface).children
+      if (childEffects) {
+        for (let i = 0; i < childEffects.length; i++) {
+          let effect_ = childEffects[i] as ReactiveEffectAsync
+          if (effect_.effectId === effectId) {
+            effect = effect_
+            ;(activeSub as ReactiveEffectNestableInterface).addChild(effect)
+            effect.fn = effectFunction as AsyncEffectFunction
+            effect.flags2 &= ~EffectFlags_2.Unvisited
+            flags = effect.flags
+            toResume = flags & EffectFlags.PausedOnUnvisit
+            break
+          }
+        }
+      }
+    }
+  }
+  if (!effect!) {
+    if (constructor) {
+      effect = new constructor(
+        effectFunction as AsyncEffectFunction,
+        flags,
+        effectId as string,
+        isChildEffect,
+        ...additionalConstructorArgs,
+      )
+    } else {
+      effect = new ReactiveEffectAsync(
+        effectFunction as AsyncEffectFunction,
+        flags,
+        effectId as string,
+        isChildEffect,
+      )
+    }
+    ;(activeSub as ReactiveEffectNestableInterface)?.addChild(effect)
+  }
 
-	let constraint = blacklist || whitelist
-	if (constraint) {
-		effect.setConstraint(constraint, blacklist)
-	}
-	if (typeof maxConcurrentRuns === 'number' && maxConcurrentRuns > 0) {
-		effect.maxConcurrentRuns = maxConcurrentRuns
-	}
+  let constraint = blacklist || whitelist
+  if (constraint) {
+    effect.setConstraint(constraint, blacklist)
+  }
+  if (typeof maxConcurrentRuns === 'number' && maxConcurrentRuns > 0) {
+    effect.maxConcurrentRuns = maxConcurrentRuns
+  }
 
-	if (__DEV__ && options) {
-		effect.onTrack = options.onTrack
-		effect.onTrigger = options.onTrigger
-	}
+  if (__DEV__ && options) {
+    effect.onTrack = options.onTrack
+    effect.onTrigger = options.onTrigger
+  }
 
-	let toRun = true
-	if (isChildEffect) {
-		let abortOldRunOnUpdate: any = options?.abortOldRunOnUpdate
-		let isRunning = flags & EffectFlags.RUNNING
-		if (isRunning) {
-			if (abortOldRunOnUpdate) {
-				effect.abort()
-				isRunning = 0
-			}
-		}
-		if (runOnUpdate) {
-			if (isRunning && !(flags & EffectFlags.REENTRANT)) {
-				effect.flags |= EffectFlags.ScheduleRunAfterCurrentRun
-				toRun = false
-			}
-		} else {
-			toRun = effect.dirty
-		}
-		if (toResume) {
-			const effects: ReactiveEffectNestableInterface[] = [effect]
-			while (effects.length) {
-				const current = effects.pop()!
-				current.flags &= ~(EffectFlags.PAUSED | EffectFlags.PausedOnUnvisit)
-				const children = current.children
-				if (children) {
-					for (let i = children.length - 1; i >= 0; i--) {
-						const child = children[i]
-						if (!(child.flags2 & EffectFlags_2.Unvisited)) {
-							effects.push(child)
-						}
-					}
-				}
-			}
-		}
-	}
-	if (toRun) {
-		if (!(flags & EffectFlags.ManualHandling)) {
-			effect.scheduleRun(false, runOnUpdate !== 'async')
-		}
-	}
+  let toRun = true
+  if (isChildEffect) {
+    let abortOldRunOnUpdate: any = options?.abortOldRunOnUpdate
+    let isRunning = flags & EffectFlags.RUNNING
+    if (isRunning) {
+      if (abortOldRunOnUpdate) {
+        effect.abort()
+        isRunning = 0
+      }
+    }
+    if (runOnUpdate) {
+      if (isRunning && !(flags & EffectFlags.REENTRANT)) {
+        effect.flags |= EffectFlags.ScheduleRunAfterCurrentRun
+        toRun = false
+      }
+    } else {
+      toRun = effect.dirty
+    }
+    if (toResume) {
+      const effects: ReactiveEffectNestableInterface[] = [effect]
+      while (effects.length) {
+        const current = effects.pop()!
+        current.flags &= ~(EffectFlags.PAUSED | EffectFlags.PausedOnUnvisit)
+        const children = current.children
+        if (children) {
+          for (let i = children.length - 1; i >= 0; i--) {
+            const child = children[i]
+            if (!(child.flags2 & EffectFlags_2.Unvisited)) {
+              effects.push(child)
+            }
+          }
+        }
+      }
+    }
+  }
+  if (toRun) {
+    if (!(flags & EffectFlags.ManualHandling)) {
+      effect.scheduleRun(false, runOnUpdate !== 'async')
+    }
+  }
 
-	return effect
+  return effect
 }

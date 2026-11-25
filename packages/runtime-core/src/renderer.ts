@@ -1453,7 +1453,8 @@ function baseCreateRenderer(
     flags: number =
       ReactiveFlags2.IsEffect |
       ReactiveFlags2.Dirty |
-      EffectFlags.verifyThatDepsHaveChanged
+      EffectFlags.verifyThatDepsHaveChanged |
+      EffectFlags.TriggerSynchronously
 
     constructor(
       private instance: ComponentInternalInstance,

@@ -12,7 +12,7 @@ import {
   track_reactiveObjectProperty,
   trigger_reactiveObjectProperty,
 } from './dep'
-import { ReactiveFlags, TrackOpTypes, TriggerOpTypes } from './constants'
+import { ReactiveObjectFlags, TrackOpTypes, TriggerOpTypes } from './constants'
 import {
   capitalize,
   extend,
@@ -44,7 +44,7 @@ function createIterableMethod(
     this: IterableCollections,
     ...args: unknown[]
   ): Iterable<unknown> & Iterator<unknown> {
-    const target = this[ReactiveFlags.RAW]
+    const target = this[ReactiveObjectFlags.RAW]
     const rawTarget = toRaw(target)
     const targetIsMap = isMap(rawTarget)
     const isPair =
@@ -106,7 +106,7 @@ function createInstrumentations(
     get(this: MapTypes, key: unknown) {
       // #1772: readonly(reactive(Map)) should return readonly + reactive version
       // of the value
-      const target = this[ReactiveFlags.RAW]
+      const target = this[ReactiveObjectFlags.RAW]
       const rawTarget = toRaw(target)
       const rawKey = toRaw(key)
       if (!readonly) {
@@ -128,7 +128,9 @@ function createInstrumentations(
       }
     },
     get size() {
-      const target = (this as unknown as IterableCollections)[ReactiveFlags.RAW]
+      const target = (this as unknown as IterableCollections)[
+        ReactiveObjectFlags.RAW
+      ]
       !readonly &&
         track_reactiveObjectProperty(
           toRaw(target),
@@ -138,7 +140,7 @@ function createInstrumentations(
       return target.size
     },
     has(this: CollectionTypes, key: unknown): boolean {
-      const target = this[ReactiveFlags.RAW]
+      const target = this[ReactiveObjectFlags.RAW]
       const rawTarget = toRaw(target)
       const rawKey = toRaw(key)
       if (!readonly) {
@@ -153,7 +155,7 @@ function createInstrumentations(
     },
     forEach(this: IterableCollections, callback: Function, thisArg?: unknown) {
       const observed = this
-      const target = observed[ReactiveFlags.RAW]
+      const target = observed[ReactiveObjectFlags.RAW]
       const rawTarget = toRaw(target)
       const wrap = shallow ? toShallow : readonly ? toReadonly : toReactive
       !readonly &&
@@ -312,13 +314,13 @@ function createInstrumentationGetter(isReadonly: boolean, shallow: boolean) {
     key: string | symbol,
     receiver: CollectionTypes,
   ) => {
-    if (key === ReactiveFlags.IS_REACTIVE) {
+    if (key === ReactiveObjectFlags.IS_REACTIVE) {
       return !isReadonly
-    } else if (key === ReactiveFlags.IS_READONLY) {
+    } else if (key === ReactiveObjectFlags.IS_READONLY) {
       return isReadonly
-    } else if (key === ReactiveFlags.IS_SHALLOW) {
+    } else if (key === ReactiveObjectFlags.IS_SHALLOW) {
       return shallow
-    } else if (key === ReactiveFlags.RAW) {
+    } else if (key === ReactiveObjectFlags.RAW) {
       return target
     }
 

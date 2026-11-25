@@ -1,20 +1,20 @@
 // using literal strings instead of numbers so that it's easier to inspect
 // debugger events
 
-export enum TrackOpTypes {
+export const enum TrackOpTypes {
   GET = 'get',
   HAS = 'has',
   ITERATE = 'iterate',
 }
 
-export enum TriggerOpTypes {
+export const enum TriggerOpTypes {
   SET = 'set',
   ADD = 'add',
   DELETE = 'delete',
   CLEAR = 'clear',
 }
 
-export enum ReactiveFlags {
+export const enum ReactiveObjectFlags {
   SKIP = '__v_skip',
   IS_REACTIVE = '__v_isReactive',
   IS_READONLY = '__v_isReadonly',

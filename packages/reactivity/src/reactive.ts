@@ -1,4 +1,4 @@
-import { def, hasOwn, isObject, toRawType } from '@vue/shared'
+import { def, hasOwn, isObject, isSymbol, toRawType } from '@vue/shared'
 import {
   mutableHandlers,
   readonlyHandlers,
@@ -12,15 +12,15 @@ import {
   shallowReadonlyCollectionHandlers,
 } from './collectionHandlers'
 import type { RawSymbol, Ref, UnwrapRefSimple } from './ref'
-import { ReactiveFlags } from './constants'
+import { ReactiveObjectFlags } from './constants'
 import { warn } from './warning'
 
 export interface Target {
-  [ReactiveFlags.SKIP]?: boolean
-  [ReactiveFlags.IS_REACTIVE]?: boolean
-  [ReactiveFlags.IS_READONLY]?: boolean
-  [ReactiveFlags.IS_SHALLOW]?: boolean
-  [ReactiveFlags.RAW]?: any
+  [ReactiveObjectFlags.SKIP]?: boolean
+  [ReactiveObjectFlags.IS_REACTIVE]?: boolean
+  [ReactiveObjectFlags.IS_READONLY]?: boolean
+  [ReactiveObjectFlags.IS_SHALLOW]?: boolean
+  [ReactiveObjectFlags.RAW]?: any
 }
 
 export const reactiveMap: WeakMap<Target, any> = new WeakMap<Target, any>()
@@ -279,13 +279,13 @@ function createReactiveObject(
   // target is already a Proxy, return it.
   // exception: calling readonly() on a reactive object
   if (
-    target[ReactiveFlags.RAW] &&
-    !(isReadonly && target[ReactiveFlags.IS_REACTIVE])
+    target[ReactiveObjectFlags.RAW] &&
+    !(isReadonly && target[ReactiveObjectFlags.IS_REACTIVE])
   ) {
     return target
   }
   // only specific value types can be observed.
-  if (target[ReactiveFlags.SKIP] || !Object.isExtensible(target)) {
+  if (target[ReactiveObjectFlags.SKIP] || !Object.isExtensible(target)) {
     return target
   }
   // target already has corresponding Proxy
@@ -326,9 +326,9 @@ function createReactiveObject(
 /*@__NO_SIDE_EFFECTS__*/
 export function isReactive(value: unknown): boolean {
   if (isReadonly(value)) {
-    return isReactive((value as Target)[ReactiveFlags.RAW])
+    return isReactive((value as Target)[ReactiveObjectFlags.RAW])
   }
-  return !!(value && (value as Target)[ReactiveFlags.IS_REACTIVE])
+  return !!(value && (value as Target)[ReactiveObjectFlags.IS_REACTIVE])
 }
 
 /**
@@ -344,12 +344,12 @@ export function isReactive(value: unknown): boolean {
  */
 /*@__NO_SIDE_EFFECTS__*/
 export function isReadonly(value: unknown): boolean {
-  return !!(value && (value as Target)[ReactiveFlags.IS_READONLY])
+  return !!(value && (value as Target)[ReactiveObjectFlags.IS_READONLY])
 }
 
 /*@__NO_SIDE_EFFECTS__*/
 export function isShallow(value: unknown): boolean {
-  return !!(value && (value as Target)[ReactiveFlags.IS_SHALLOW])
+  return !!(value && (value as Target)[ReactiveObjectFlags.IS_SHALLOW])
 }
 
 /**
@@ -361,7 +361,7 @@ export function isShallow(value: unknown): boolean {
  */
 /*@__NO_SIDE_EFFECTS__*/
 export function isProxy(value: any): boolean {
-  return value ? !!value[ReactiveFlags.RAW] : false
+  return value ? !!value[ReactiveObjectFlags.RAW] : false
 }
 
 /**
@@ -389,7 +389,7 @@ export function isProxy(value: any): boolean {
  */
 /*@__NO_SIDE_EFFECTS__*/
 export function toRaw<T>(observed: T): T {
-  const raw = observed && (observed as Target)[ReactiveFlags.RAW]
+  const raw = observed && (observed as Target)[ReactiveObjectFlags.RAW]
   return raw ? toRaw(raw) : observed
 }
 
@@ -418,8 +418,8 @@ export type Raw<T> = T & { [RawSymbol]?: true }
  * @see {@link https://vuejs.org/api/reactivity-advanced.html#markraw}
  */
 export function markRaw<T extends object>(value: T): Raw<T> {
-  if (!hasOwn(value, ReactiveFlags.SKIP) && Object.isExtensible(value)) {
-    def(value, ReactiveFlags.SKIP, true)
+  if (!hasOwn(value, ReactiveObjectFlags.SKIP) && Object.isExtensible(value)) {
+    def(value, ReactiveObjectFlags.SKIP, true)
   }
   return value
 }

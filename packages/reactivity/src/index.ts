@@ -9,6 +9,7 @@ export {
   proxyRefs,
   customRef,
   triggerRef,
+  refFromReactiveProp,
   type Ref,
   type MaybeRef,
   type MaybeRefOrGetter,
@@ -93,7 +94,11 @@ export {
   onScopeDispose,
 } from './effectScope'
 export { reactiveReadArray, shallowReadArray } from './arrayInstrumentations'
-export { TrackOpTypes, TriggerOpTypes, ReactiveFlags } from './constants'
+export {
+  TrackOpTypes,
+  TriggerOpTypes,
+  ReactiveObjectFlags as ReactiveFlags,
+} from './constants'
 export {
   watch,
   getCurrentWatcher,
