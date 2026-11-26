@@ -7,7 +7,12 @@ import {
   type ReactiveEffectAsync,
   type ReactiveEffectOptions,
 } from './effect'
-import { type Link, ReactiveFlags, type ReactiveNode } from './system'
+import {
+  type Link,
+  LinkFlags,
+  ReactiveFlags,
+  type ReactiveNode,
+} from './system'
 import { Dep } from './dep'
 
 export const triggerEventInfos: DebuggerEventExtraInfo[] = []
@@ -101,7 +106,7 @@ export function getDepLinks(e: ReactiveEffectAsync): any {
   return links.map(
     (d: Link) =>
       // @ts-ignore
-      `d:{id:${d.dep.DepID ?? d.dep.id ?? d.dep.ID}, k:${(d.dep as Dep).key?.toString() || ''}}, linked:${d.tracking_Islinked}`,
+      `d:{id:${d.dep.DepID ?? d.dep.id ?? d.dep.ID}, k:${(d.dep as Dep).key?.toString() || ''}}, linked:${d.flags & LinkFlags.tracking_Islinked}`,
   )
 }
 // @ts-ignore

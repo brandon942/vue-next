@@ -34,7 +34,6 @@ export interface Link {
   nextSub: Link | undefined
   prevDep: Link | undefined
   nextDep: Link | undefined
-  tracking_Islinked?: Boolean
   activeSubLinkPrev?: Link
   flags: LinkFlags
 }
@@ -44,6 +43,7 @@ export const enum LinkFlags {
   NOTIFIED = 1,
   TRACKED = 2,
   TO_CHECK_COMPUTED = 4,
+  tracking_Islinked = 8,
 }
 
 export const enum ReactiveFlags {
@@ -102,7 +102,7 @@ export function link(dep: ReactiveNode, sub: ReactiveNode): void {
   if (recursedCheck) {
     nextDepLink = sub_depsTail !== undefined ? sub_depsTail.nextDep : sub.deps
     if (nextDepLink !== undefined && nextDepLink.dep === dep) {
-      nextDepLink.tracking_Islinked = true
+      nextDepLink.flags |= LinkFlags.tracking_Islinked
       if (asyncRun) {
         ;(sub as ReactiveEffectAsync).lastTrackedDepLink = nextDepLink
       }
@@ -112,14 +112,14 @@ export function link(dep: ReactiveNode, sub: ReactiveNode): void {
 
     var activeLink = dep.activeSubLink
     if (activeLink?.sub === sub) {
-      if (activeLink.tracking_Islinked) {
+      if (activeLink.flags & LinkFlags.tracking_Islinked) {
         return
       }
       activeLink.prevDep!.nextDep = activeLink.nextDep
       if (activeLink.nextDep) activeLink.nextDep.prevDep = activeLink.prevDep
       activeLink.prevDep = sub_depsTail
       activeLink.nextDep = nextDepLink
-      activeLink.tracking_Islinked = true
+      activeLink.flags |= LinkFlags.tracking_Islinked
       if (asyncRun) {
         ;(sub as ReactiveEffectAsync).lastTrackedDepLink = activeLink
       }
@@ -137,14 +137,13 @@ export function link(dep: ReactiveNode, sub: ReactiveNode): void {
   }
   const prevSub = dep.subsTail
   const newLink = (dep.subsTail = {
-    flags: 0,
+    flags: LinkFlags.tracking_Islinked,
     dep,
     sub,
     prevDep: sub_depsTail,
     nextDep: nextDepLink,
     prevSub,
     nextSub: undefined,
-    tracking_Islinked: true,
   }) as Link
   if (asyncRun) {
     ;(sub as ReactiveEffectAsync).lastTrackedDepLink = newLink
@@ -299,7 +298,7 @@ export function notifySubs(subsLink: Link, dirtyShallow?: any): void {
             (ReactiveFlags.Dirty | ReactiveFlags.PendingNotification)
           ) &&
           sub.depsTail &&
-          subsLink.tracking_Islinked
+          subsLink.flags & LinkFlags.tracking_Islinked
         ) {
           subFlags =
             subFlags2 |
@@ -419,7 +418,7 @@ export function endTracking(
         dep.activeSubLink = depLink.activeSubLinkPrev
         depLink.activeSubLinkPrev = undefined
       }
-      depLink.tracking_Islinked = false
+      depLink.flags &= ~LinkFlags.tracking_Islinked
       depLink = depLink.nextDep
     }
 
@@ -575,7 +574,7 @@ export function shallowPropagateDirtinessToAllSubs(link: Link): void {
       link.flags &= ~LinkFlags.TO_CHECK_COMPUTED
       let isLinkNotYetTracked =
         link == (link.dep as ReactiveNode).activeSubLink &&
-        !link.tracking_Islinked
+        !(link.flags & LinkFlags.tracking_Islinked)
       if (!isLinkNotYetTracked) {
         sub.flags = subFlags | ReactiveFlags.Dirty
         let subs

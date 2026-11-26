@@ -1872,7 +1872,7 @@ function endRun(
         if (wasInterrupted) {
           let depLink = effect.deps
           while (depLink) {
-            depLink.tracking_Islinked = false
+            depLink.flags &= ~LinkFlags.tracking_Islinked
             depLink = depLink.nextDep
           }
         }
@@ -2035,7 +2035,7 @@ function finalizeTracktingAndRemoveUnusedDeps(
       lastTrackedDepLink !== undefined ? lastTrackedDepLink.nextDep : sub.deps
     let depLink = sub.deps
     while (depLink) {
-      depLink.tracking_Islinked = false
+      depLink.flags &= ~LinkFlags.tracking_Islinked
       depLink = depLink.nextDep
     }
 
